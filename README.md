@@ -1,67 +1,102 @@
+<div align="center">
+
 # Tile Palette Layout Studio
 
-[![Unity][unity-badge]][unity] [![Package Version][version-badge]][package] [![License][license-badge]][license] [![GitHub Stars][stars-badge]][stargazers]
+**Rebuild structured Unity Tile Palettes from loose Sprite assets.**
 
-**Reconstruct structured Unity Tile Palettes from loose Sprite assets.**
+An AI-assisted Unity Editor extension that groups related tiles, infers their relative grid placement, previews the reconstructed layout, and safely builds it into a reusable Tile Palette.
 
-Tile Palette Layout Studio is a Unity Editor extension that identifies tiles that visually belong together, infers their relative grid positions, and rebuilds them into organized multi-tile groups — even when the source Sprites are imported from separate texture files.
+[![Unity 2022.3+](https://img.shields.io/badge/Unity-2022.3%2B-000000?logo=unity&logoColor=white)](https://unity.com/releases/editor/archive)
+[![Package](https://img.shields.io/badge/package-v0.1.0-2ea44f)](https://github.com/uushu/tile-palette-layout-studio/blob/main/package.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
+[![GitHub stars](https://img.shields.io/github/stars/uushu/tile-palette-layout-studio?style=flat)](https://github.com/uushu/tile-palette-layout-studio/stargazers)
 
-Instead of dragging dozens of independent Tiles back into walls, cliffs, buildings, transitions, or other multi-tile patterns by hand, select a Sprite folder, analyze the layout, review the result, and build it into a reusable Unity Tile Palette.
+</div>
 
-> Layout reconstruction is inference-based. The Studio validates structure and asset identity, but the preview remains the final review step before writing to the Palette.
+---
 
-## Overview
+## What is Tile Palette Layout Studio?
+
+Tile Palette Layout Studio is a Unity Editor tool for **reconstructing meaningful Tile Palette structure from loose Sprite assets**.
+
+A tileset does not always arrive as one clean spritesheet. Related pieces may be imported as separate PNGs, split across multiple textures, or otherwise lose the spatial arrangement that made the original object readable.
+
+The Studio analyzes those Sprites, determines which ones visually belong together, infers their relative cell positions, and rebuilds them as organized multi-tile structures inside Unity's Tile Palette.
+
+It is not a file sorter.
+
+It is a **Tile Palette layout reconstruction tool**.
 
 ```text
-Loose Sprite Assets
+Loose Sprite assets
         ↓
-Analyze Layout
+Visual grouping
         ↓
-Visual Grouping + Spatial Reconstruction
+Spatial layout inference
         ↓
-2D Layout Preview
+Structured 2D preview
         ↓
-Build / Update Palette
-        ↓
-Manual Edits → Ctrl+S → Profile Sync
+Build / Update Tile Palette
 ```
 
-The tool is designed for tile art whose useful visual structure has been lost at import time — especially asset packs where related tiles arrive as separate PNGs or otherwise no longer share a usable source layout.
+> Layout reconstruction is inference-based. The tool validates Sprite identity, completeness, collisions, and local edge consistency, while the preview remains the final review step before writing to the Palette.
 
-It reconstructs that structure at the **Tile Palette level**:
+## Why?
 
-- related Sprites are grouped into visual objects or tile patterns;
-- each Sprite receives a relative grid position inside its group;
-- groups are written into a structured Tile Palette layout;
-- existing compatible Tile assets are reused where possible;
-- later manual Palette edits can be synchronized back to the Profile.
+When a multi-tile object is split into independent Sprites, Unity still knows how to render each Sprite, but it no longer knows how those pieces were meant to relate spatially.
+
+A structure such as this:
+
+```text
+        ┌───┐
+        │ A │
+    ┌───┼───┼───┐
+    │ B │ C │ D │
+    └───┼───┼───┘
+        │ E │
+        └───┘
+```
+
+may arrive in the project as nothing more than:
+
+```text
+A.png   B.png   C.png   D.png   E.png
+```
+
+Rebuilding walls, cliffs, buildings, terrain transitions, props, or other multi-tile patterns by hand is repetitive and error-prone.
+
+Tile Palette Layout Studio reconstructs the **grouping** and **relative spatial relationships** so those pieces become readable and reusable again in the Palette.
 
 ## Features
 
-- **Loose Sprite reconstruction** — works with Sprites discovered across multiple Texture assets, not only a single spritesheet.
-- **Visual grouping** — identifies Sprites that appear to belong to the same multi-tile object or pattern.
-- **Spatial layout inference** — reconstructs relative cell positions instead of merely sorting files by name.
-- **2D preview before build** — inspect the inferred layout before the Palette is modified.
-- **Stable Sprite identity** — Unity asset GUID and local file ID are used as permanent identity; filenames are only optional hints.
-- **Safe incremental builds** — compatible Tiles are reused, correct placements are preserved, and only missing ordinary Tiles are created.
-- **Transactional rollback** — the Profile and Palette are backed up before writes and restored if a build fails.
-- **Manual edit synchronization** — moving or deleting managed Tiles and saving the Palette updates the Profile.
-- **Multiple Profiles** — different Sprite sources and Palette prefabs can be managed independently.
+- **Layout reconstruction** — rebuilds structured Tile Palette layouts rather than merely sorting Sprite files.
+- **Loose Sprite support** — related Sprites may come from separate Texture assets or from the same spritesheet.
+- **Visual grouping** — identifies tiles that appear to belong to the same object, terrain set, transition, or pattern.
+- **Spatial inference** — assigns relative grid coordinates to each Sprite inside its reconstructed group.
+- **2D layout preview** — review the inferred structure before changing the Palette.
+- **Stable Sprite identity** — Unity GUID + local file ID are used as persistent identity; filenames are only optional hints.
+- **Safe incremental builds** — reuses compatible Tile assets and creates only what is missing.
+- **Conflict validation** — rejects missing, unknown, duplicate, or colliding Sprite placements.
+- **Transactional rollback** — restores the Profile and Palette if a build fails.
+- **Manual edit sync** — move or remove managed Tiles in the Palette, save, and synchronize those edits back to the Profile.
+- **Multiple Profiles** — manage different Sprite sources and Palette prefabs independently.
 
 ## Requirements
 
-- Unity **2022.3** or newer.
-- Unity **2D Tilemap**.
-- A source folder containing textures imported as Sprite.
-- A folder for generated Tile assets.
-- A Palette prefab containing exactly one Tilemap.
-- A Zhipu AI API Key for the included visual-analysis provider.
+- Unity **2022.3** or newer
+- Unity **2D Tilemap**
+- A source folder containing assets imported as `Sprite`
+- A folder for generated `Tile` assets
+- A Tile Palette prefab containing exactly one `Tilemap`
+- A Zhipu AI API Key for the included vision provider
 
 ## Installation
 
 ### Unity Package Manager
 
-Open **Window → Package Manager**, select **Add package from git URL...**, and enter:
+Open **Window → Package Manager**.
+
+Select **+ → Add package from git URL...** and enter:
 
 ```text
 https://github.com/uushu/tile-palette-layout-studio.git
@@ -69,71 +104,150 @@ https://github.com/uushu/tile-palette-layout-studio.git
 
 ### Local development
 
-Clone this repository, then select **Add package from disk...** in Package Manager and choose `package.json`.
+Clone the repository, then use:
 
-## Quick Start
+```text
+Package Manager
+→ +
+→ Add package from disk...
+→ package.json
+```
+
+## Getting Started
 
 1. Open **Tools → Tile Palette → Layout Studio**.
 2. Create or select a **Profile**.
-3. Assign the **Source Folder**, **Tile Output Folder**, and **Palette Prefab**.
-4. Click **Analyze Layout**.
-5. On first use, enter your GLM API Key and save it locally.
-6. Review the generated **Layout Preview**.
-7. Click **Build / Update Palette**.
-8. Use **Validate** whenever you want to verify the Profile, Tile assets, and Palette cells.
+3. Assign the **Source Folder**.
+4. Assign the **Tile Output Folder**.
+5. Assign the target **Palette Prefab**.
+6. Click **Analyze Layout**.
+7. Enter your GLM API Key on first use.
+8. Review the generated **Layout Preview**.
+9. Click **Build / Update Palette**.
 
-## How Layout Reconstruction Works
+The normal workflow is intentionally short:
 
-The source scanner recursively discovers every Sprite under the selected folder. A Sprite may come from its own Texture file or be one of multiple Sprites imported from the same Texture.
+```text
+Select source
+   ↓
+Analyze
+   ↓
+Review
+   ↓
+Build
+```
 
-For analysis, the Studio:
+## How it works
 
-1. reads Sprite pixels through Unity's GPU texture path without changing `Read/Write` import settings;
-2. assigns every Sprite a stable analysis ID backed by its Unity GUID and local file ID;
-3. uses filenames only as optional grouping hints;
-4. creates numbered contact sheets in batches of at most **36 Sprites**;
-5. asks the configured vision provider to divide the Sprites into visual groups and infer a 2D grid position for every Sprite;
-6. rejects missing, unknown, duplicate, or colliding Sprite IDs;
-7. merges valid batches;
-8. locally checks neighboring tile edges as an additional confidence signal;
-9. presents one final two-dimensional layout for review.
+### 1. Discover Sprites
 
-The important distinction is that the Studio does **not** merely sort Sprites into a cleaner list. It attempts to recover their **visual grouping and relative spatial layout** so that multi-tile structures become readable again inside Unity's Tile Palette.
+The source scanner recursively discovers every Sprite under the selected folder.
 
-Optional `TileLayoutTemplate` assets can provide project-specific hints without hard-coding project rules into the analyzer.
+Sprites can come from:
 
-## Build & Synchronization
+- individual PNG files;
+- multiple Texture assets;
+- a spritesheet containing multiple Sprite sub-assets;
+- a mixture of the above.
 
-The **Profile** is the authoritative layout description for a managed Palette.
+The tool does not require every related tile to live in the same Texture.
 
-When **Build / Update Palette** runs, the builder:
+### 2. Preserve stable identity
+
+Every Sprite is tracked using its Unity asset GUID and local file ID.
+
+Names such as `wall_01`, `wall_left`, or `cliff_corner` are treated as optional semantic hints, not permanent identity.
+
+### 3. Build visual contact sheets
+
+Sprites are rendered into numbered contact sheets for visual analysis without changing their `Read/Write` import setting.
+
+Large inputs are automatically divided into batches of up to **36 Sprites**.
+
+### 4. Reconstruct the layout
+
+The vision provider analyzes every Sprite and returns:
+
+- a visual group;
+- an optional subgroup;
+- a relative `(x, y)` grid position for each Sprite;
+- an overall confidence value.
+
+The important distinction is:
+
+```text
+Sorting
+A B C D E
+
+vs.
+
+Reconstruction
+    A
+  B C D
+    E
+```
+
+Tile Palette Layout Studio performs the second operation.
+
+### 5. Validate the result
+
+Before a layout is accepted, the Studio rejects:
+
+- missing Sprite IDs;
+- unknown Sprite IDs;
+- duplicate Sprite IDs;
+- duplicate coordinates within a group;
+- invalid managed-cell conflicts.
+
+Adjacent tile edges are also compared locally and used as an additional confidence signal.
+
+### 6. Preview before writing
+
+The reconstructed 2D layout is displayed inside the editor before the Tile Palette is modified.
+
+This keeps the inference visible instead of silently treating it as ground truth.
+
+## Build & Update
+
+The Profile is the authoritative description of a managed layout.
+
+When **Build / Update Palette** runs, the Studio:
 
 - reuses compatible existing Tile assets;
 - creates only missing ordinary Tile assets;
-- keeps Tiles that are already in the correct cells;
+- preserves Tiles already in the correct cells;
 - moves known Tiles to their Profile positions;
-- rejects ambiguous custom `TileBase` assets and coordinate conflicts;
-- backs up the Palette prefab and Profile before writing;
-- restores both and removes newly created Tile assets if the build fails.
+- rejects ambiguous custom `TileBase` assets;
+- rejects coordinate conflicts;
+- backs up the Profile and Palette before writing.
 
-Manual Palette edits remain part of the workflow. After moving or deleting managed Tiles, press `Ctrl+S`:
+If the operation fails, the previous valid state is restored and newly created Tile assets are removed.
 
-- moving an entire group updates its group origin;
+## Manual Editing & Synchronization
+
+The generated Palette is still editable by hand.
+
+After modifying managed Tiles in Unity and pressing `Ctrl + S`:
+
+- moving a complete group updates the group origin;
 - moving one Tile creates a per-Tile manual override;
 - deleting a managed Tile marks it as disabled;
 - duplicate or ambiguous Tiles produce a warning;
-- synchronization failures restore the previous valid Profile and Palette state.
+- synchronization failures restore the previous valid state.
+
+This makes reconstruction a starting point, not a lock-in.
 
 ## API Key & Vision Provider
 
 The included provider currently uses:
 
-- **Provider:** Zhipu AI
-- **Model:** `glm-4.6v-flash`
-- **Endpoint:** `https://open.bigmodel.cn/api/paas/v4/chat/completions`
-- **Environment variable:** `ZHIPUAI_API_KEY`
+| | |
+| --- | --- |
+| Provider | Zhipu AI |
+| Model | `glm-4.6v-flash` |
+| Environment variable | `ZHIPUAI_API_KEY` |
 
-When entered through the Studio, the key is stored only in the consuming Unity project's local file:
+When entered through the Studio, the API Key is stored locally in the consuming Unity project:
 
 ```text
 Library/TilePaletteLayoutStudio/.env.local
@@ -141,24 +255,33 @@ Library/TilePaletteLayoutStudio/.env.local
 
 It is not written to `Assets`, Profiles, package files, logs, or Git.
 
-Provider implementations use `ITilePaletteVisionProvider` and are discovered through Unity `TypeCache`. Each provider owns its endpoint, model, authentication headers, request format, and response parsing.
+Provider integrations implement `ITilePaletteVisionProvider` and are discovered with Unity `TypeCache`, keeping provider-specific request and authentication logic separate from layout reconstruction.
 
-## Editor Architecture
+<details>
+<summary><strong>Editor architecture</strong></summary>
+
+<br>
 
 | Component | Responsibility |
 | --- | --- |
-| `TilePaletteLayoutStudioWindow` | Profile selection, actions, and 2D preview |
+| `TilePaletteLayoutStudioWindow` | Profile selection, actions, and layout preview |
 | `TilePaletteSourceScanner` | Sprite discovery and local pixel features |
 | `TilePaletteContactSheetRenderer` | Numbered contact-sheet generation |
-| `TilePaletteVisionAnalyzer` | Grouping, batching, spatial inference, merge, and validation |
-| `TilePaletteVisionHttpClient` | `UnityWebRequest`, timeout, proxy detection, and bounded retry |
-| `ITilePaletteVisionProvider` | Provider-specific transport and response format |
-| `TilePaletteBuilder` | Build planning, transactional writes, rollback, and validation |
-| `TilePaletteAutoSync` | Save-time synchronization after manual Palette edits |
+| `TilePaletteVisionAnalyzer` | Batching, grouping, spatial inference, merge, and validation |
+| `TilePaletteLayoutVerifier` | Local adjacent-edge verification |
+| `TilePaletteVisionHttpClient` | Vision HTTP transport, timeout, proxy detection, and retry |
+| `ITilePaletteVisionProvider` | Provider-specific request and response format |
+| `TilePaletteBuilder` | Build planning, transactional writes, validation, and rollback |
+| `TilePaletteAutoSync` | Synchronization after manual Palette edits |
 
-## Tests
+</details>
 
-The package contains EditMode tests for:
+<details>
+<summary><strong>Validation & tests</strong></summary>
+
+<br>
+
+The package includes EditMode coverage for:
 
 - optional naming hints;
 - missing Sprite rejection;
@@ -168,7 +291,7 @@ The package contains EditMode tests for:
 - exact managed-cell behavior for layout holes;
 - provider discovery.
 
-The batch self-validation entry point is:
+Batch validation entry point:
 
 ```text
 -executeMethod TilePaletteLayoutStudio.TilePaletteLayoutStudioValidation.RunAll
@@ -180,21 +303,14 @@ Reports are written to:
 Library/TilePaletteLayoutStudio/Reports/latest.txt
 ```
 
+</details>
+
 ## Contributing
 
 Issues and pull requests are welcome.
 
-For layout-related bug reports, include the Unity version, the expected structure, the generated preview, and a minimal description of the source Sprite set when possible.
+For layout reconstruction issues, please include the Unity version, expected structure, generated preview, and a minimal description of the source Sprite set when possible.
 
 ## License
 
-Tile Palette Layout Studio is available under the [MIT License](LICENSE.md).
-
-[unity-badge]: https://img.shields.io/badge/Unity-2022.3%2B-000000?logo=unity&logoColor=white
-[unity]: https://unity.com/releases/editor/archive
-[version-badge]: https://img.shields.io/badge/package-v0.1.0-2ea44f
-[package]: https://github.com/uushu/tile-palette-layout-studio/blob/main/package.json
-[license-badge]: https://img.shields.io/badge/License-MIT-blue.svg
-[license]: https://github.com/uushu/tile-palette-layout-studio/blob/main/LICENSE.md
-[stars-badge]: https://img.shields.io/github/stars/uushu/tile-palette-layout-studio?style=flat
-[stargazers]: https://github.com/uushu/tile-palette-layout-studio/stargazers
+Tile Palette Layout Studio is released under the [MIT License](LICENSE.md).
