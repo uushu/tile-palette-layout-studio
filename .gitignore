@@ -1,0 +1,11 @@
+.DS_Store
+.idea/
+.vscode/
+Library/
+Logs/
+Temp/
+obj/
+*.csproj
+*.sln
+*.suo
+*.user
