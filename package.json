@@ -3,7 +3,7 @@
   "displayName": "Tile Palette Layout Studio",
   "version": "0.1.0",
   "unity": "2022.3",
-  "description": "A Unity Editor tool that uses visual analysis to arrange individually imported Sprite assets into safe, reusable Tile Palette layouts.",
+  "description": "A Unity Editor extension that reconstructs structured Tile Palette layouts from loose Sprite assets using visual analysis.",
   "keywords": [
     "2d",
     "tile",
