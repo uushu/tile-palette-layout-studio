@@ -1,5 +1,6 @@
 using System;
-using System.Linq;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -46,10 +47,6 @@ namespace TilePaletteLayoutStudio
         internal const int ContextWindow = 4096;
         internal const int MaximumPredictedTokens = 2048;
         private const string KeepAlive = "2m";
-        private const string CompactPromptSuffix =
-            "\nUse the compact schema keys exactly: c=confidence, p=placements, " +
-            "i=id, g=group, s=subgroup. Keep g and s as short stable labels " +
-            "such as g0/g1 and s0/s1. Return no prose.";
 
         private static string TagsUrl => BaseUrl + "/api/tags";
         private static string GenerateUrl => BaseUrl + "/api/generate";
@@ -139,6 +136,7 @@ namespace TilePaletteLayoutStudio
                 return;
             }
 
+            string[] orderedIds = ExtractOrderedIds(responseSchemaJson);
             string json;
             try
             {
@@ -195,6 +193,15 @@ namespace TilePaletteLayoutStudio
                         OllamaGenerateResult parsed =
                             ParseGenerateResponse(result.Body);
                         parsed.ElapsedMilliseconds = result.ElapsedMilliseconds;
+
+                        if (parsed.Status == OllamaClientStatus.Success &&
+                            orderedIds.Length > 0)
+                        {
+                            parsed.Content = ExpandPositionalResponse(
+                                parsed.Content,
+                                orderedIds);
+                        }
+
                         Debug.Log(
                             "[TilePalette] Ollama timing: " +
                             FormatTiming(parsed));
@@ -262,13 +269,23 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException(
                     "Response schema is empty.");
 
-            string compactSchema =
-                CompactResponseSchema(responseSchemaJson);
+            string[] orderedIds = ExtractOrderedIds(responseSchemaJson);
+            bool usePositionalOutput = orderedIds.Length > 0;
+            string effectivePrompt = prompt ?? string.Empty;
+            string effectiveSchema = responseSchemaJson;
+
+            if (usePositionalOutput)
+            {
+                effectivePrompt += BuildPositionalPromptSuffix(orderedIds);
+                effectiveSchema = BuildPositionalResponseSchema(
+                    orderedIds.Length);
+            }
+
             GenerateRequest request = new GenerateRequest
             {
                 model = Model,
                 system = systemPrompt ?? string.Empty,
-                prompt = (prompt ?? string.Empty) + CompactPromptSuffix,
+                prompt = effectivePrompt,
                 images = new[] { Convert.ToBase64String(pngBytes) },
                 stream = false,
                 think = false,
@@ -285,17 +302,75 @@ namespace TilePaletteLayoutStudio
             return AddRawProperty(
                 json,
                 "format",
-                compactSchema);
+                effectiveSchema);
         }
 
-        internal static string CompactResponseSchema(string schema)
+        internal static string[] ExtractOrderedIds(string schema)
         {
-            return (schema ?? string.Empty)
-                .Replace("\"confidence\"", "\"c\"")
-                .Replace("\"placements\"", "\"p\"")
-                .Replace("\"subgroup\"", "\"s\"")
-                .Replace("\"group\"", "\"g\"")
-                .Replace("\"id\"", "\"i\"");
+            if (string.IsNullOrWhiteSpace(schema))
+                return Array.Empty<string>();
+
+            Match enumMatch = Regex.Match(
+                schema,
+                "\\\"enum\\\"\\s*:\\s*\\[(?<values>[^\\]]*)\\]",
+                RegexOptions.CultureInvariant);
+            if (!enumMatch.Success)
+                return Array.Empty<string>();
+
+            List<string> ids = new List<string>();
+            MatchCollection valueMatches = Regex.Matches(
+                enumMatch.Groups["values"].Value,
+                "\\\"(?<value>[^\\\"]+)\\\"",
+                RegexOptions.CultureInvariant);
+
+            foreach (Match match in valueMatches)
+            {
+                string value = match.Groups["value"].Value;
+                if (!string.IsNullOrWhiteSpace(value))
+                    ids.Add(value);
+            }
+
+            return ids.ToArray();
+        }
+
+        internal static string BuildPositionalResponseSchema(int count)
+        {
+            if (count <= 0)
+                throw new ArgumentOutOfRangeException(nameof(count));
+
+            return
+                "{\"type\":\"object\"," +
+                "\"properties\":{" +
+                    "\"c\":{" +
+                        "\"type\":\"number\"," +
+                        "\"minimum\":0," +
+                        "\"maximum\":1}," +
+                    "\"p\":{" +
+                        "\"type\":\"array\"," +
+                        "\"minItems\":" + count + "," +
+                        "\"maxItems\":" + count + "," +
+                        "\"items\":{" +
+                            "\"type\":\"object\"," +
+                            "\"properties\":{" +
+                                "\"g\":{" +
+                                    "\"type\":\"integer\"," +
+                                    "\"minimum\":0}," +
+                                "\"s\":{" +
+                                    "\"type\":\"integer\"," +
+                                    "\"minimum\":0}," +
+                                "\"x\":{" +
+                                    "\"type\":\"integer\"}," +
+                                "\"y\":{" +
+                                    "\"type\":\"integer\"}" +
+                            "}," +
+                            "\"required\":[" +
+                                "\"g\",\"s\",\"x\",\"y\"]," +
+                            "\"additionalProperties\":false" +
+                        "}" +
+                    "}" +
+                "}," +
+                "\"required\":[\"c\",\"p\"]," +
+                "\"additionalProperties\":false}";
         }
 
         internal static OllamaGenerateResult ParseGenerateResponse(
@@ -337,45 +412,51 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException(
                     "Response does not contain generated content.");
 
-            result.Content = ExpandCompactResponse(response.response);
             return result;
         }
 
-        internal static string ExpandCompactResponse(string content)
+        internal static string ExpandPositionalResponse(
+            string content,
+            IReadOnlyList<string> orderedIds)
         {
-            if (string.IsNullOrWhiteSpace(content))
+            if (orderedIds == null || orderedIds.Count == 0)
                 return content ?? string.Empty;
 
-            CompactEnvelope compact;
-            try
-            {
-                compact = JsonUtility.FromJson<CompactEnvelope>(content);
-            }
-            catch
-            {
-                return content;
-            }
-
+            PositionalEnvelope compact =
+                JsonUtility.FromJson<PositionalEnvelope>(content);
             if (compact?.p == null)
-                return content;
+                throw new InvalidOperationException(
+                    "Compact response does not contain p.");
+            if (compact.p.Length != orderedIds.Count)
+                throw new InvalidOperationException(
+                    $"Compact response count mismatch: expected " +
+                    $"{orderedIds.Count}, got {compact.p.Length}.");
 
-            ExpandedEnvelope expanded = new ExpandedEnvelope
+            ExpandedPlacement[] placements =
+                new ExpandedPlacement[orderedIds.Count];
+
+            for (int index = 0; index < orderedIds.Count; index++)
+            {
+                PositionalPlacement entry = compact.p[index];
+                if (entry == null)
+                    throw new InvalidOperationException(
+                        $"Compact response placement {index + 1} is null.");
+
+                placements[index] = new ExpandedPlacement
+                {
+                    id = orderedIds[index],
+                    group = "g" + entry.g,
+                    subgroup = "s" + entry.s,
+                    x = entry.x,
+                    y = entry.y
+                };
+            }
+
+            return JsonUtility.ToJson(new ExpandedEnvelope
             {
                 confidence = compact.c,
-                placements = compact.p
-                    .Where(entry => entry != null)
-                    .Select(entry => new ExpandedPlacement
-                    {
-                        id = entry.i,
-                        group = entry.g,
-                        subgroup = entry.s,
-                        x = entry.x,
-                        y = entry.y
-                    })
-                    .ToArray()
-            };
-
-            return JsonUtility.ToJson(expanded);
+                placements = placements
+            });
         }
 
         internal static string FormatTiming(OllamaGenerateResult result)
@@ -394,6 +475,22 @@ namespace TilePaletteLayoutStudio
                 $"({result.PromptEvalCount} tokens), " +
                 $"generate={NanosecondsToSeconds(result.EvalDurationNanoseconds):0.0}s " +
                 $"({result.EvalCount} tokens)" + stop;
+        }
+
+        private static string BuildPositionalPromptSuffix(
+            IReadOnlyList<string> orderedIds)
+        {
+            return
+                "\nOutput compact positional JSON only. p must contain exactly " +
+                orderedIds.Count +
+                " items in this exact ID order: " +
+                string.Join(",", orderedIds) +
+                ". Do not output IDs inside p. p[0] belongs to the first ID, " +
+                "p[1] to the second, and so on. Each p item contains only " +
+                "integer g,s,x,y. Use small non-negative integers for g and s; " +
+                "reuse the same g/s pair for pieces in the same subgroup. " +
+                "If an anchor says group=gN and subgroup=sM, output g=N and s=M. " +
+                "Return no prose.";
         }
 
         private static double NanosecondsToSeconds(long nanoseconds)
@@ -452,18 +549,17 @@ namespace TilePaletteLayoutStudio
         }
 
         [Serializable]
-        private sealed class CompactEnvelope
+        private sealed class PositionalEnvelope
         {
             public float c;
-            public CompactPlacement[] p;
+            public PositionalPlacement[] p;
         }
 
         [Serializable]
-        private sealed class CompactPlacement
+        private sealed class PositionalPlacement
         {
-            public string i;
-            public string g;
-            public string s;
+            public int g;
+            public int s;
             public int x;
             public int y;
         }
