@@ -11,6 +11,7 @@ namespace TilePaletteLayoutStudio
     internal static class TilePaletteVisionHttpClient
     {
         private const int MaximumAttempts = 2;
+        private const string ProviderOverloadCode = "\"code\":\"1305\"";
 
         public static void Send(
             VisionProviderRequest request,
@@ -111,8 +112,9 @@ namespace TilePaletteLayoutStudio
                         return;
                     }
 
+                    string response = webRequest.downloadHandler?.text;
                     if (attempt < MaximumAttempts &&
-                        IsRetryable(webRequest.responseCode))
+                        IsRetryableResponse(webRequest.responseCode, response))
                     {
                         int delaySeconds =
                             ResolveRetryDelaySeconds(webRequest, attempt);
@@ -128,7 +130,6 @@ namespace TilePaletteLayoutStudio
                         return;
                     }
 
-                    string response = webRequest.downloadHandler?.text;
                     if (!string.IsNullOrWhiteSpace(response) &&
                         response.Length > 500)
                         response = response.Substring(0, 500);
@@ -158,14 +159,27 @@ namespace TilePaletteLayoutStudio
             EditorApplication.update += Poll;
         }
 
-        private static bool IsRetryable(long responseCode) =>
-            responseCode == 0 ||
-            responseCode == 408 ||
-            responseCode == 429 ||
-            responseCode == 500 ||
-            responseCode == 502 ||
-            responseCode == 503 ||
-            responseCode == 504;
+        internal static bool IsRetryableResponse(
+            long responseCode,
+            string response)
+        {
+            if (responseCode == 429 && IsProviderOverloaded(response))
+                return false;
+
+            return responseCode == 0 ||
+                   responseCode == 408 ||
+                   responseCode == 429 ||
+                   responseCode == 500 ||
+                   responseCode == 502 ||
+                   responseCode == 503 ||
+                   responseCode == 504;
+        }
+
+        internal static bool IsProviderOverloaded(string response) =>
+            !string.IsNullOrWhiteSpace(response) &&
+            response.IndexOf(
+                ProviderOverloadCode,
+                StringComparison.Ordinal) >= 0;
 
         private static int ResolveRetryDelaySeconds(
             UnityWebRequest request,
@@ -264,6 +278,13 @@ namespace TilePaletteLayoutStudio
             string response,
             string proxyAddress)
         {
+            if (responseCode == 429 && IsProviderOverloaded(response))
+            {
+                return "视觉模型当前访问量过大（HTTP 429 / code 1305）。" +
+                       "这是服务端模型容量限制，不是本地网络或 API Key 错误；" +
+                       "本次请求不会继续自动重试，请稍后再试。";
+            }
+
             if (responseCode != 0)
                 return $"HTTP {responseCode} {requestError}: {response}";
 
