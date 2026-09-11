@@ -421,8 +421,6 @@ namespace TilePaletteLayoutStudio
                             case VisionAnalysisStatus.Cancelled:
                                 previewIsStale =
                                     analyzedLayout != null;
-                                Debug.LogWarning(
-                                    "[TilePalette] 分析已取消，已保留上一次成功预览。");
                                 break;
 
                             default:
