@@ -1,7 +1,7 @@
 {
   "name": "com.uushu.tile-palette-layout-studio",
   "displayName": "Tile Palette Layout Studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "unity": "2022.3",
   "description": "A Unity Editor extension that reconstructs structured Tile Palette layouts from loose Sprite assets using visual analysis.",
   "keywords": [
