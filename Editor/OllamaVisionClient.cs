@@ -26,6 +26,7 @@ namespace TilePaletteLayoutStudio
         public OllamaClientStatus Status;
         public string Content = string.Empty;
         public string Error = string.Empty;
+        public string DoneReason = string.Empty;
         public long ElapsedMilliseconds;
         public long TotalDurationNanoseconds;
         public long LoadDurationNanoseconds;
@@ -42,7 +43,7 @@ namespace TilePaletteLayoutStudio
         internal const int ReadyTimeoutSeconds = 5;
         internal const int GenerateTimeoutSeconds = 120;
         internal const int ContextWindow = 4096;
-        internal const int MaximumPredictedTokens = 1024;
+        internal const int MaximumPredictedTokens = 2048;
         private const string KeepAlive = "2m";
 
         private static string TagsUrl => BaseUrl + "/api/tags";
@@ -289,14 +290,12 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException("Response is empty.");
             if (!string.IsNullOrWhiteSpace(response.error))
                 throw new InvalidOperationException(response.error);
-            if (string.IsNullOrWhiteSpace(response.response))
-                throw new InvalidOperationException(
-                    "Response does not contain generated content.");
 
-            return new OllamaGenerateResult
+            OllamaGenerateResult result = new OllamaGenerateResult
             {
                 Status = OllamaClientStatus.Success,
-                Content = response.response,
+                Content = response.response ?? string.Empty,
+                DoneReason = response.done_reason ?? string.Empty,
                 TotalDurationNanoseconds = response.total_duration,
                 LoadDurationNanoseconds = response.load_duration,
                 PromptEvalCount = response.prompt_eval_count,
@@ -304,11 +303,33 @@ namespace TilePaletteLayoutStudio
                 EvalCount = response.eval_count,
                 EvalDurationNanoseconds = response.eval_duration
             };
+
+            if (string.Equals(
+                    response.done_reason,
+                    "length",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                result.Status = OllamaClientStatus.InvalidResponse;
+                result.Error =
+                    "Ollama output was truncated at the generation limit " +
+                    $"({response.eval_count}/{MaximumPredictedTokens} tokens).";
+                return result;
+            }
+
+            if (string.IsNullOrWhiteSpace(response.response))
+                throw new InvalidOperationException(
+                    "Response does not contain generated content.");
+
+            return result;
         }
 
         internal static string FormatTiming(OllamaGenerateResult result)
         {
             if (result == null) return "no timing data";
+
+            string stop = string.IsNullOrWhiteSpace(result.DoneReason)
+                ? string.Empty
+                : $", stop={result.DoneReason}";
 
             return
                 $"wall={result.ElapsedMilliseconds / 1000d:0.0}s, " +
@@ -317,7 +338,7 @@ namespace TilePaletteLayoutStudio
                 $"prompt={NanosecondsToSeconds(result.PromptEvalDurationNanoseconds):0.0}s " +
                 $"({result.PromptEvalCount} tokens), " +
                 $"generate={NanosecondsToSeconds(result.EvalDurationNanoseconds):0.0}s " +
-                $"({result.EvalCount} tokens)";
+                $"({result.EvalCount} tokens)" + stop;
         }
 
         private static double NanosecondsToSeconds(long nanoseconds)
@@ -365,6 +386,7 @@ namespace TilePaletteLayoutStudio
         {
             public string response;
             public bool done;
+            public string done_reason;
             public string error;
             public long total_duration;
             public long load_duration;
