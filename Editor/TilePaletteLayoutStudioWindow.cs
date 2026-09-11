@@ -138,7 +138,10 @@ namespace TilePaletteLayoutStudio
         {
             EditorGUILayout.Space(10f);
             EditorGUILayout.LabelField("Vision Analysis", EditorStyles.boldLabel);
-            Rect progressRect = GUILayoutUtility.GetRect(18f, 18f, "TextField");
+            Rect progressRect = GUILayoutUtility.GetRect(
+                18f,
+                18f,
+                GUILayout.ExpandWidth(true));
             float progress = analysisBatchCount <= 0
                 ? 0f
                 : Mathf.Clamp01(analysisBatch / (float)analysisBatchCount);
