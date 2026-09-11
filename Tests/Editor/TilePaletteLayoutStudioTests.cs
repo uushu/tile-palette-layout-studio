@@ -84,6 +84,8 @@ namespace TilePaletteLayoutStudio.Tests
             Assert.That(json, Does.Contain("\"stream\":false"));
             Assert.That(json, Does.Contain("\"think\":false"));
             Assert.That(json, Does.Contain("\"temperature\":0.0"));
+            Assert.That(json, Does.Contain("\"num_ctx\":4096"));
+            Assert.That(json, Does.Contain("\"num_predict\":2048"));
             Assert.That(json, Does.Contain("\"format\":{\"type\":\"object\""));
         }
 
@@ -110,6 +112,7 @@ namespace TilePaletteLayoutStudio.Tests
             string json =
                 "{\"response\":\"{\\\"confidence\\\":1,\\\"placements\\\":[]}\"," +
                 "\"done\":true," +
+                "\"done_reason\":\"stop\"," +
                 "\"total_duration\":1200000," +
                 "\"load_duration\":300000}";
 
@@ -118,8 +121,26 @@ namespace TilePaletteLayoutStudio.Tests
 
             Assert.That(result.Status, Is.EqualTo(OllamaClientStatus.Success));
             Assert.That(result.Content, Does.Contain("\"confidence\":1"));
+            Assert.That(result.DoneReason, Is.EqualTo("stop"));
             Assert.That(result.TotalDurationNanoseconds, Is.EqualTo(1200000));
             Assert.That(result.LoadDurationNanoseconds, Is.EqualTo(300000));
+        }
+
+        [Test]
+        public void OllamaClient_ExpandsPositionalResponse()
+        {
+            string expanded = OllamaVisionClient.ExpandPositionalResponse(
+                "{\"c\":0.9,\"p\":[" +
+                "{\"g\":0,\"s\":0,\"x\":2,\"y\":-1}," +
+                "{\"g\":1,\"s\":0,\"x\":0,\"y\":0}]}",
+                new[] { "T0003", "T0008" });
+
+            Assert.That(expanded, Does.Contain("\"id\":\"T0003\""));
+            Assert.That(expanded, Does.Contain("\"id\":\"T0008\""));
+            Assert.That(expanded, Does.Contain("\"group\":\"g0\""));
+            Assert.That(expanded, Does.Contain("\"group\":\"g1\""));
+            Assert.That(expanded, Does.Contain("\"x\":2"));
+            Assert.That(expanded, Does.Contain("\"y\":-1"));
         }
 
         [Test]
@@ -179,23 +200,29 @@ namespace TilePaletteLayoutStudio.Tests
                         .Select(index => Source("second", index)))
                 .ToList();
 
-            IReadOnlyList<IReadOnlyList<SourceSpriteInfo>> batches =
-                TilePaletteVisionAnalyzer.BuildBatches(sources);
+            IReadOnlyList<VisionAnalysisBatch> batches =
+                TilePaletteVisionAnalyzer.BuildAnalysisBatches(sources);
 
             Assert.That(batches, Has.Count.EqualTo(2));
-            Assert.That(batches.All(batch => batch.Count == 20), Is.True);
+            Assert.That(batches[0].NewSources, Has.Count.EqualTo(20));
+            Assert.That(batches[1].NewSources, Has.Count.EqualTo(20));
             Assert.That(
-                batches.Any(batch =>
-                    batch.All(source => source.groupName == "first")),
+                batches[0].NewSources.All(source =>
+                    source.groupName == "first"),
                 Is.True);
             Assert.That(
-                batches.Any(batch =>
-                    batch.All(source => source.groupName == "second")),
+                batches[1].NewSources.All(source =>
+                    source.groupName == "second"),
                 Is.True);
+            Assert.That(batches[0].RequiresAnchors, Is.False);
+            Assert.That(batches[1].RequiresAnchors, Is.True);
+            Assert.That(
+                batches[1].ContinuationKey,
+                Is.EqualTo(TilePaletteVisionAnalyzer.GlobalContinuationKey));
         }
 
         [Test]
-        public void VisionAnalyzer_SplitsLargeGroupsWithContinuationCapacity()
+        public void VisionAnalyzer_SplitsLargeGroupsWithGlobalContinuationCapacity()
         {
             List<SourceSpriteInfo> sources = Enumerable
                 .Range(1, 73)
@@ -205,22 +232,74 @@ namespace TilePaletteLayoutStudio.Tests
             IReadOnlyList<VisionAnalysisBatch> batches =
                 TilePaletteVisionAnalyzer.BuildAnalysisBatches(sources);
 
-            Assert.That(batches, Has.Count.EqualTo(4));
-            Assert.That(batches[0].NewSources, Has.Count.EqualTo(24));
+            Assert.That(batches, Has.Count.EqualTo(3));
+            Assert.That(batches[0].NewSources, Has.Count.EqualTo(30));
             Assert.That(batches[0].RequiresAnchors, Is.False);
-            Assert.That(batches[1].NewSources, Has.Count.EqualTo(18));
+            Assert.That(batches[1].NewSources, Has.Count.EqualTo(24));
             Assert.That(batches[1].RequiresAnchors, Is.True);
-            Assert.That(batches[2].NewSources, Has.Count.EqualTo(18));
+            Assert.That(batches[2].NewSources, Has.Count.EqualTo(19));
             Assert.That(batches[2].RequiresAnchors, Is.True);
-            Assert.That(batches[3].NewSources, Has.Count.EqualTo(13));
-            Assert.That(batches[3].RequiresAnchors, Is.True);
             Assert.That(
-                batches.Skip(1).All(
-                    batch => batch.ContinuationKey == "large"),
+                batches.Skip(1).All(batch =>
+                    batch.ContinuationKey ==
+                    TilePaletteVisionAnalyzer.GlobalContinuationKey),
                 Is.True);
             Assert.That(
                 batches.Sum(batch => batch.NewSources.Count),
                 Is.EqualTo(73));
+        }
+
+        [Test]
+        public void VisionAnalyzer_UsesGlobalContinuationAcrossUnrelatedHints()
+        {
+            List<SourceSpriteInfo> sources = Enumerable
+                .Range(1, 70)
+                .Select(index => Source("singleton-" + index, index))
+                .ToList();
+
+            IReadOnlyList<VisionAnalysisBatch> batches =
+                TilePaletteVisionAnalyzer.BuildAnalysisBatches(sources);
+
+            Assert.That(batches, Has.Count.EqualTo(3));
+            Assert.That(batches[0].NewSources, Has.Count.EqualTo(30));
+            Assert.That(batches[1].NewSources, Has.Count.EqualTo(24));
+            Assert.That(batches[2].NewSources, Has.Count.EqualTo(16));
+            Assert.That(batches[0].RequiresAnchors, Is.False);
+            Assert.That(
+                batches.Skip(1).All(batch => batch.RequiresAnchors),
+                Is.True);
+            Assert.That(
+                batches.Skip(1).All(batch =>
+                    batch.ContinuationKey ==
+                    TilePaletteVisionAnalyzer.GlobalContinuationKey),
+                Is.True);
+        }
+
+        [Test]
+        public void VisionAnalyzer_ShufflesContactSheetOrderDeterministically()
+        {
+            List<SourceSpriteInfo> sources = Enumerable
+                .Range(1, 12)
+                .Select(index => Source("group", index))
+                .ToList();
+
+            string[] first = TilePaletteVisionAnalyzer
+                .OrderContactSheetSources(sources, 0)
+                .Select(source => source.analysisId)
+                .ToArray();
+            string[] second = TilePaletteVisionAnalyzer
+                .OrderContactSheetSources(sources, 0)
+                .Select(source => source.analysisId)
+                .ToArray();
+            string[] original = sources
+                .Select(source => source.analysisId)
+                .ToArray();
+
+            Assert.That(first, Is.EqualTo(second));
+            Assert.That(first, Is.Not.EqualTo(original));
+            Assert.That(
+                first.OrderBy(value => value, StringComparer.Ordinal),
+                Is.EqualTo(original.OrderBy(value => value, StringComparer.Ordinal)));
         }
 
         [Test]
@@ -325,14 +404,6 @@ namespace TilePaletteLayoutStudio.Tests
                 {
                     new AnalyzedLayoutPlacement
                     {
-                        resourceId = "resource-anchor",
-                        sourceId = "anchor",
-                        groupName = "object",
-                        subgroupName = "main",
-                        localPosition = Vector3Int.zero
-                    },
-                    new AnalyzedLayoutPlacement
-                    {
                         resourceId = "resource-new",
                         sourceId = "new",
                         groupName = "object",
@@ -358,6 +429,24 @@ namespace TilePaletteLayoutStudio.Tests
                 target.placements.Any(value =>
                     value.subgroupName.Contains("_batch_")),
                 Is.False);
+        }
+
+        [Test]
+        public void VisionAnalyzer_NextGroupIndexAdvancesPastExistingGroups()
+        {
+            AnalyzedLayout layout = new AnalyzedLayout
+            {
+                placements = new List<AnalyzedLayoutPlacement>
+                {
+                    Placement("a", "g0", Vector3Int.zero),
+                    Placement("b", "g3", Vector3Int.right),
+                    Placement("c", "custom", Vector3Int.up)
+                }
+            };
+
+            Assert.That(
+                TilePaletteVisionAnalyzer.NextGroupIndex(layout),
+                Is.EqualTo(4));
         }
 
         [Test]
