@@ -87,7 +87,6 @@ namespace TilePaletteLayoutStudio
 
         private bool cancelRequested;
         private bool finished;
-        private bool ollamaReady;
 
         public void Cancel()
         {
@@ -101,7 +100,6 @@ namespace TilePaletteLayoutStudio
         {
             cancelRequested = false;
             finished = false;
-            ollamaReady = false;
 
             if (request?.sources == null || !request.sources.IsValid)
             {
@@ -152,7 +150,6 @@ namespace TilePaletteLayoutStudio
                         return;
                     }
 
-                    ollamaReady = true;
                     StartBatches(request, progress, completed);
                 });
         }
@@ -1210,13 +1207,6 @@ namespace TilePaletteLayoutStudio
         {
             if (finished) return;
             finished = true;
-
-            if (ollamaReady)
-            {
-                ollamaReady = false;
-                OllamaVisionClient.ReleaseModel();
-            }
-
             completed(result);
         }
 
