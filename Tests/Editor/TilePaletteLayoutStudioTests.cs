@@ -87,6 +87,28 @@ namespace TilePaletteLayoutStudio.Tests
         }
 
         [Test]
+        public void VisionHttpClient_DoesNotRetryProviderOverload1305()
+        {
+            const string overload =
+                "{\"error\":{\"code\":\"1305\",\"message\":\"model overloaded\"}}";
+
+            Assert.That(
+                TilePaletteVisionHttpClient.IsProviderOverloaded(overload),
+                Is.True);
+            Assert.That(
+                TilePaletteVisionHttpClient.IsRetryableResponse(429, overload),
+                Is.False);
+            Assert.That(
+                TilePaletteVisionHttpClient.IsRetryableResponse(
+                    429,
+                    "{\"error\":{\"code\":\"rate_limit\"}}"),
+                Is.True);
+            Assert.That(
+                TilePaletteVisionHttpClient.IsRetryableResponse(503, string.Empty),
+                Is.True);
+        }
+
+        [Test]
         public void ManagedCells_DoNotIncludeLayoutHoles()
         {
             TilePaletteProfile profile = ScriptableObject.CreateInstance<TilePaletteProfile>();
