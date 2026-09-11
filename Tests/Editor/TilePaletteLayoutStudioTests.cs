@@ -85,7 +85,7 @@ namespace TilePaletteLayoutStudio.Tests
             Assert.That(json, Does.Contain("\"think\":false"));
             Assert.That(json, Does.Contain("\"temperature\":0.0"));
             Assert.That(json, Does.Contain("\"num_ctx\":4096"));
-            Assert.That(json, Does.Contain("\"num_predict\":2048"));
+            Assert.That(json, Does.Contain("\"num_predict\":1536"));
             Assert.That(json, Does.Contain("\"format\":{\"type\":\"object\""));
         }
 
@@ -110,7 +110,7 @@ namespace TilePaletteLayoutStudio.Tests
         public void OllamaClient_ParsesGenerateResponse()
         {
             string json =
-                "{\"response\":\"{\\\"confidence\\\":1,\\\"placements\\\":[]}\"," +
+                "{\"response\":\"{\\\"g\\\":[0],\\\"s\\\":[0],\\\"x\\\":[0],\\\"y\\\":[0]}\"," +
                 "\"done\":true," +
                 "\"done_reason\":\"stop\"," +
                 "\"total_duration\":1200000," +
@@ -120,19 +120,17 @@ namespace TilePaletteLayoutStudio.Tests
                 OllamaVisionClient.ParseGenerateResponse(json);
 
             Assert.That(result.Status, Is.EqualTo(OllamaClientStatus.Success));
-            Assert.That(result.Content, Does.Contain("\"confidence\":1"));
+            Assert.That(result.Content, Does.Contain("\"g\":[0]"));
             Assert.That(result.DoneReason, Is.EqualTo("stop"));
             Assert.That(result.TotalDurationNanoseconds, Is.EqualTo(1200000));
             Assert.That(result.LoadDurationNanoseconds, Is.EqualTo(300000));
         }
 
         [Test]
-        public void OllamaClient_ExpandsPositionalResponse()
+        public void OllamaClient_ExpandsParallelResponse()
         {
-            string expanded = OllamaVisionClient.ExpandPositionalResponse(
-                "{\"c\":0.9,\"p\":[" +
-                "{\"g\":0,\"s\":0,\"x\":2,\"y\":-1}," +
-                "{\"g\":1,\"s\":0,\"x\":0,\"y\":0}]}",
+            string expanded = OllamaVisionClient.ExpandParallelResponse(
+                "{\"g\":[0,1],\"s\":[0,0],\"x\":[2,0],\"y\":[-1,0]}",
                 new[] { "T0003", "T0008" });
 
             Assert.That(expanded, Does.Contain("\"id\":\"T0003\""));
@@ -141,6 +139,43 @@ namespace TilePaletteLayoutStudio.Tests
             Assert.That(expanded, Does.Contain("\"group\":\"g1\""));
             Assert.That(expanded, Does.Contain("\"x\":2"));
             Assert.That(expanded, Does.Contain("\"y\":-1"));
+        }
+
+        [Test]
+        public void OllamaClient_ParallelSchemaOmitsConfidence()
+        {
+            string schema = OllamaVisionClient.BuildParallelResponseSchema(3);
+
+            Assert.That(schema, Does.Contain("\"g\""));
+            Assert.That(schema, Does.Contain("\"s\""));
+            Assert.That(schema, Does.Contain("\"x\""));
+            Assert.That(schema, Does.Contain("\"y\""));
+            Assert.That(schema, Does.Contain("\"minItems\":3"));
+            Assert.That(schema, Does.Contain("\"maxItems\":3"));
+            Assert.That(schema, Does.Not.Contain("confidence"));
+            Assert.That(schema, Does.Not.Contain("\"c\""));
+        }
+
+        [Test]
+        public void LayoutVerifier_CompactsSparseCoordinates()
+        {
+            AnalyzedLayout layout = new AnalyzedLayout
+            {
+                placements = new List<AnalyzedLayoutPlacement>
+                {
+                    Placement("a", "group", new Vector3Int(0, 0, 0)),
+                    Placement("b", "group", new Vector3Int(4, 0, 0)),
+                    Placement("c", "group", new Vector3Int(9, 0, 0))
+                }
+            };
+
+            TilePaletteLayoutVerifier.RepairLayout(layout);
+
+            int[] xs = layout.placements
+                .OrderBy(value => value.localPosition.x)
+                .Select(value => value.localPosition.x)
+                .ToArray();
+            Assert.That(xs, Is.EqualTo(new[] { 0, 1, 2 }));
         }
 
         [Test]
