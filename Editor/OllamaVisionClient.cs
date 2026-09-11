@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -45,6 +46,10 @@ namespace TilePaletteLayoutStudio
         internal const int ContextWindow = 4096;
         internal const int MaximumPredictedTokens = 2048;
         private const string KeepAlive = "2m";
+        private const string CompactPromptSuffix =
+            "\nUse the compact schema keys exactly: c=confidence, p=placements, " +
+            "i=id, g=group, s=subgroup. Keep g and s as short stable labels " +
+            "such as g0/g1 and s0/s1. Return no prose.";
 
         private static string TagsUrl => BaseUrl + "/api/tags";
         private static string GenerateUrl => BaseUrl + "/api/generate";
@@ -257,11 +262,13 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException(
                     "Response schema is empty.");
 
+            string compactSchema =
+                CompactResponseSchema(responseSchemaJson);
             GenerateRequest request = new GenerateRequest
             {
                 model = Model,
                 system = systemPrompt ?? string.Empty,
-                prompt = prompt ?? string.Empty,
+                prompt = (prompt ?? string.Empty) + CompactPromptSuffix,
                 images = new[] { Convert.ToBase64String(pngBytes) },
                 stream = false,
                 think = false,
@@ -278,7 +285,17 @@ namespace TilePaletteLayoutStudio
             return AddRawProperty(
                 json,
                 "format",
-                responseSchemaJson);
+                compactSchema);
+        }
+
+        internal static string CompactResponseSchema(string schema)
+        {
+            return (schema ?? string.Empty)
+                .Replace("\"confidence\"", "\"c\"")
+                .Replace("\"placements\"", "\"p\"")
+                .Replace("\"subgroup\"", "\"s\"")
+                .Replace("\"group\"", "\"g\"")
+                .Replace("\"id\"", "\"i\"");
         }
 
         internal static OllamaGenerateResult ParseGenerateResponse(
@@ -320,7 +337,45 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException(
                     "Response does not contain generated content.");
 
+            result.Content = ExpandCompactResponse(response.response);
             return result;
+        }
+
+        internal static string ExpandCompactResponse(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return content ?? string.Empty;
+
+            CompactEnvelope compact;
+            try
+            {
+                compact = JsonUtility.FromJson<CompactEnvelope>(content);
+            }
+            catch
+            {
+                return content;
+            }
+
+            if (compact?.p == null)
+                return content;
+
+            ExpandedEnvelope expanded = new ExpandedEnvelope
+            {
+                confidence = compact.c,
+                placements = compact.p
+                    .Where(entry => entry != null)
+                    .Select(entry => new ExpandedPlacement
+                    {
+                        id = entry.i,
+                        group = entry.g,
+                        subgroup = entry.s,
+                        x = entry.x,
+                        y = entry.y
+                    })
+                    .ToArray()
+            };
+
+            return JsonUtility.ToJson(expanded);
         }
 
         internal static string FormatTiming(OllamaGenerateResult result)
@@ -394,6 +449,40 @@ namespace TilePaletteLayoutStudio
             public long prompt_eval_duration;
             public long eval_count;
             public long eval_duration;
+        }
+
+        [Serializable]
+        private sealed class CompactEnvelope
+        {
+            public float c;
+            public CompactPlacement[] p;
+        }
+
+        [Serializable]
+        private sealed class CompactPlacement
+        {
+            public string i;
+            public string g;
+            public string s;
+            public int x;
+            public int y;
+        }
+
+        [Serializable]
+        private sealed class ExpandedEnvelope
+        {
+            public float confidence;
+            public ExpandedPlacement[] placements;
+        }
+
+        [Serializable]
+        private sealed class ExpandedPlacement
+        {
+            public string id;
+            public string group;
+            public string subgroup;
+            public int x;
+            public int y;
         }
 
         [Serializable]
