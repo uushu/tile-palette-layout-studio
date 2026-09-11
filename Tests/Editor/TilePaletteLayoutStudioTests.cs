@@ -82,6 +82,7 @@ namespace TilePaletteLayoutStudio.Tests
             Assert.That(json, Does.Contain("\"model\":\"qwen2.5vl:7b\""));
             Assert.That(json, Does.Contain("\"images\":[\"AQID\"]"));
             Assert.That(json, Does.Contain("\"stream\":false"));
+            Assert.That(json, Does.Contain("\"think\":false"));
             Assert.That(json, Does.Contain("\"temperature\":0.0"));
             Assert.That(json, Does.Contain("\"format\":{\"type\":\"object\""));
         }
