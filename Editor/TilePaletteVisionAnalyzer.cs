@@ -77,8 +77,9 @@ namespace TilePaletteLayoutStudio
 
     internal sealed class TilePaletteVisionAnalyzer
     {
-        internal const int MaximumSpritesPerRequest = 24;
+        internal const int MaximumSpritesPerRequest = 30;
         internal const int AnchorSpritesPerContinuation = 6;
+        internal const string GlobalContinuationKey = "__global_layout__";
 
         private const string SystemInstruction =
             "Infer only a 2D tile layout from the supplied Sprite contact sheet. " +
@@ -218,10 +219,16 @@ namespace TilePaletteLayoutStudio
         internal static IReadOnlyList<VisionAnalysisBatch> BuildAnalysisBatches(
             IReadOnlyList<SourceSpriteInfo> sources)
         {
-            List<VisionAnalysisBatch> batches = new List<VisionAnalysisBatch>();
-            List<SourceSpriteInfo> current = new List<SourceSpriteInfo>();
-            IGrouping<string, SourceSpriteInfo>[] hintGroups = sources
-                .OrderBy(source => source.analysisId, StringComparer.Ordinal)
+            List<VisionAnalysisBatch> batches =
+                new List<VisionAnalysisBatch>();
+            List<SourceSpriteInfo> current =
+                new List<SourceSpriteInfo>();
+
+            IGrouping<string, SourceSpriteInfo>[] hintGroups =
+                (sources ?? Array.Empty<SourceSpriteInfo>())
+                .OrderBy(
+                    source => source.analysisId,
+                    StringComparer.Ordinal)
                 .GroupBy(
                     source => source.groupName ?? string.Empty,
                     StringComparer.Ordinal)
@@ -230,66 +237,48 @@ namespace TilePaletteLayoutStudio
                     StringComparer.Ordinal)
                 .ToArray();
 
-            foreach (IGrouping<string, SourceSpriteInfo> hintGroup in hintGroups)
+            foreach (IGrouping<string, SourceSpriteInfo> hintGroup
+                     in hintGroups)
             {
                 SourceSpriteInfo[] grouped = hintGroup
-                    .OrderBy(source => source.analysisId, StringComparer.Ordinal)
+                    .OrderBy(
+                        source => source.analysisId,
+                        StringComparer.Ordinal)
                     .ToArray();
+                int offset = 0;
 
-                if (grouped.Length > MaximumSpritesPerRequest)
+                while (offset < grouped.Length)
                 {
-                    FlushBatch(current, batches);
+                    int capacity =
+                        batches.Count == 0
+                            ? MaximumSpritesPerRequest
+                            : MaximumSpritesPerRequest -
+                              AnchorSpritesPerContinuation;
+                    int remainingCapacity = capacity - current.Count;
+                    int remainingGroup = grouped.Length - offset;
 
-                    bool canContinue =
-                        !string.IsNullOrWhiteSpace(hintGroup.Key);
-                    if (!canContinue)
+                    // Keep a small filename-hint group together when it can fit
+                    // in a fresh batch. The global continuation still applies
+                    // after the first batch, so every later batch shares one
+                    // coordinate/group namespace through anchors.
+                    if (current.Count > 0 &&
+                        remainingGroup <= capacity &&
+                        remainingGroup > remainingCapacity)
                     {
-                        for (int offset = 0;
-                             offset < grouped.Length;
-                             offset += MaximumSpritesPerRequest)
-                        {
-                            batches.Add(new VisionAnalysisBatch(
-                                grouped
-                                    .Skip(offset)
-                                    .Take(MaximumSpritesPerRequest)
-                                    .ToArray(),
-                                string.Empty,
-                                false));
-                        }
+                        FlushBatch(current, batches);
                         continue;
                     }
 
-                    batches.Add(new VisionAnalysisBatch(
-                        grouped
-                            .Take(MaximumSpritesPerRequest)
-                            .ToArray(),
-                        hintGroup.Key,
-                        false));
+                    int take = Math.Min(
+                        remainingCapacity,
+                        remainingGroup);
+                    current.AddRange(
+                        grouped.Skip(offset).Take(take));
+                    offset += take;
 
-                    int continuationCapacity =
-                        MaximumSpritesPerRequest -
-                        AnchorSpritesPerContinuation;
-                    for (int offset = MaximumSpritesPerRequest;
-                         offset < grouped.Length;
-                         offset += continuationCapacity)
-                    {
-                        batches.Add(new VisionAnalysisBatch(
-                            grouped
-                                .Skip(offset)
-                                .Take(continuationCapacity)
-                                .ToArray(),
-                            hintGroup.Key,
-                            true));
-                    }
-                    continue;
+                    if (current.Count >= capacity)
+                        FlushBatch(current, batches);
                 }
-
-                if (current.Count > 0 &&
-                    current.Count + grouped.Length >
-                    MaximumSpritesPerRequest)
-                    FlushBatch(current, batches);
-
-                current.AddRange(grouped);
             }
 
             FlushBatch(current, batches);
@@ -495,8 +484,7 @@ namespace TilePaletteLayoutStudio
                         Status = VisionAnalysisStatus.Failed,
                         Error =
                             $"Batch {batchIndex + 1}/{batches.Count} " +
-                            $"cannot continue group " +
-                            $"'{batch.ContinuationKey}' because no " +
+                            "cannot continue the global layout because no " +
                             "stable anchors are available."
                     },
                     completed);
@@ -518,6 +506,19 @@ namespace TilePaletteLayoutStudio
                     requestSources.Add(source);
             }
 
+            IReadOnlyList<SourceSpriteInfo> sheetSources =
+                OrderContactSheetSources(
+                    requestSources,
+                    batchIndex);
+            SourceScanResult batchSources =
+                CreateSubset(request.sources, sheetSources);
+            SourceScanResult responseSources =
+                batch.RequiresAnchors
+                    ? CreateSubset(
+                        request.sources,
+                        batch.NewSources)
+                    : batchSources;
+
             ReportProgress(
                 progress,
                 VisionAnalysisStage.PreparingBatch,
@@ -529,8 +530,6 @@ namespace TilePaletteLayoutStudio
                     : $"Preparing batch {batchIndex + 1}/" +
                       $"{batches.Count}");
 
-            SourceScanResult batchSources =
-                CreateSubset(request.sources, requestSources);
             TilePaletteContactSheet sheet = null;
 
             try
@@ -553,9 +552,10 @@ namespace TilePaletteLayoutStudio
                     batchIndex,
                     batches.Count,
                     anchors,
-                    batch.NewSources);
+                    batch.NewSources,
+                    NextGroupIndex(combined));
                 string schema =
-                    BuildResponseSchema(batchSources.sprites);
+                    BuildResponseSchema(responseSources.sprites);
                 byte[] image = sheet.PngBytes;
 
                 sheet.Dispose();
@@ -626,11 +626,7 @@ namespace TilePaletteLayoutStudio
                             AnalyzedLayout batchLayout =
                                 ParseLayoutText(
                                     result.Content,
-                                    batchSources);
-
-                            ValidateAnchors(
-                                batchLayout,
-                                anchors);
+                                    responseSources);
 
                             MergeBatch(
                                 combined,
@@ -698,14 +694,53 @@ namespace TilePaletteLayoutStudio
             return subset;
         }
 
+        internal static IReadOnlyList<SourceSpriteInfo> OrderContactSheetSources(
+            IEnumerable<SourceSpriteInfo> sources,
+            int batchIndex)
+        {
+            return (sources ?? Array.Empty<SourceSpriteInfo>())
+                .OrderBy(
+                    source => StableShuffleKey(
+                        source?.analysisId ?? string.Empty,
+                        batchIndex))
+                .ThenBy(
+                    source => source?.analysisId ?? string.Empty,
+                    StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        private static uint StableShuffleKey(
+            string value,
+            int batchIndex)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                string text = batchIndex + ":" + (value ?? string.Empty);
+                foreach (char character in text)
+                {
+                    hash ^= character;
+                    hash *= 16777619u;
+                }
+                return hash;
+            }
+        }
+
         internal static IReadOnlyList<VisionAnchor> SelectAnchors(
             InferenceRequest request,
             AnalyzedLayout combined,
             string continuationKey)
         {
+            bool globalContinuation =
+                string.Equals(
+                    continuationKey,
+                    GlobalContinuationKey,
+                    StringComparison.Ordinal);
+
             Dictionary<string, SourceSpriteInfo> candidatesByResource =
                 request.sources.sprites
                     .Where(source =>
+                        globalContinuation ||
                         string.Equals(
                             source.groupName ?? string.Empty,
                             continuationKey ?? string.Empty,
@@ -780,6 +815,28 @@ namespace TilePaletteLayoutStudio
             }
 
             return anchors;
+        }
+
+        internal static int NextGroupIndex(AnalyzedLayout layout)
+        {
+            int maximum = -1;
+            if (layout == null) return 0;
+
+            foreach (string groupName in layout.placements
+                         .Select(value => value.groupName)
+                         .Where(value =>
+                             !string.IsNullOrWhiteSpace(value))
+                         .Distinct(StringComparer.Ordinal))
+            {
+                if (groupName.Length > 1 &&
+                    (groupName[0] == 'g' || groupName[0] == 'G') &&
+                    int.TryParse(
+                        groupName.Substring(1),
+                        out int index))
+                    maximum = Math.Max(maximum, index);
+            }
+
+            return maximum + 1;
         }
 
         internal static void ValidateAnchors(
@@ -943,49 +1000,37 @@ namespace TilePaletteLayoutStudio
             int batchIndex,
             int batchCount,
             IReadOnlyList<VisionAnchor> anchors,
-            IReadOnlyList<SourceSpriteInfo> newSources)
+            IReadOnlyList<SourceSpriteInfo> newSources,
+            int nextGroupIndex)
         {
             StringBuilder builder = new StringBuilder();
+            bool continuation = anchors != null && anchors.Count > 0;
+            IReadOnlyList<SourceSpriteInfo> outputSources =
+                continuation
+                    ? newSources
+                    : request.sources.sprites;
 
             builder.Append("This is batch ")
                 .Append(batchIndex + 1)
                 .Append(" of ")
                 .Append(batchCount)
-                .Append(". It contains exactly ")
+                .Append(". The contact sheet contains ")
                 .Append(request.sources.sprites.Count)
-                .AppendLine(
-                    " Sprites in one contact sheet.");
+                .AppendLine(" Sprites.");
 
             builder.AppendLine(
-                "Return exactly one placement record for every numbered Sprite in the contact sheet. " +
-                "The placements array must contain exactly " +
-                request.sources.sprites.Count +
-                " records, one for each required Sprite ID, with no omissions or duplicates.");
+                "IMPORTANT: contact-sheet cell position, row, column, and ordering are arbitrary presentation only. " +
+                "Never copy the contact-sheet arrangement into x/y. Infer adjacency and grid coordinates from the visual tile content, seams, edges, and filename hints only.");
 
-            builder.AppendLine(
-                "Each Sprite cell has a high-contrast " +
-                "two-digit image label. Use the Image " +
-                "labels mapping to map each cell to the " +
-                "required Sprite ID.");
-
-            builder.AppendLine(
-                "For each placement, assign group and subgroup names for pieces that visually belong " +
-                "to the same structure, and infer that Sprite's 2D grid position.");
-
-            builder.AppendLine(
-                "Within each subgroup, coordinates must be " +
-                "unique. Use y=0 for the top row and " +
-                "decreasing y values for rows below it.");
-
-            if (anchors != null && anchors.Count > 0)
+            if (continuation)
             {
+                builder.Append("Return exactly ")
+                    .Append(outputSources.Count)
+                    .AppendLine(
+                        " placement records for the NEW Sprite IDs only. Anchors are visual coordinate references and MUST NOT be returned.");
+
                 builder.AppendLine(
-                    "This batch continues a structure from " +
-                    "an earlier batch. The following anchor " +
-                    "Sprites are fixed. Return every anchor " +
-                    "exactly once with the exact same group, " +
-                    "subgroup, x, and y. Do not rename, move, " +
-                    "or omit them:");
+                    "The following anchors are already fixed in the global layout. Use their exact group/subgroup and coordinates as the reference frame for new Sprites:");
 
                 foreach (VisionAnchor anchor in anchors)
                 {
@@ -1002,32 +1047,35 @@ namespace TilePaletteLayoutStudio
                         .AppendLine();
                 }
 
-                builder.Append(
-                        "New Sprite IDs to place in that " +
-                        "shared coordinate system: ")
-                    .AppendLine(string.Join(
-                        ", ",
-                        newSources
-                            .Select(
-                                source =>
-                                    source.analysisId)
-                            .OrderBy(
-                                id => id,
-                                StringComparer.Ordinal)));
+                builder.AppendLine(
+                    "Reuse an anchor's group/subgroup only when the new Sprite visually belongs to that same structure. " +
+                    "For a new unrelated structure, allocate a fresh group number instead of reusing an existing group.");
+                builder.Append("Fresh groups must use gN with N >= ")
+                    .Append(nextGroupIndex)
+                    .AppendLine(".");
+            }
+            else
+            {
+                builder.Append("Return exactly ")
+                    .Append(outputSources.Count)
+                    .AppendLine(
+                        " placement records, one for every required Sprite ID, with no omissions or duplicates.");
             }
 
-            builder.Append("Required IDs: ")
+            builder.AppendLine(
+                "For each returned Sprite, infer the 2D grid position. Within each subgroup, coordinates must be unique. " +
+                "Use y=0 for the top row and decreasing y values for rows below it.");
+
+            builder.Append("Required output IDs: ")
                 .AppendLine(string.Join(
                     ", ",
-                    request.sources.sprites
-                        .Select(
-                            source =>
-                                source.analysisId)
+                    outputSources
+                        .Select(source => source.analysisId)
                         .OrderBy(
                             id => id,
                             StringComparer.Ordinal)));
 
-            builder.Append("Image labels: ")
+            builder.Append("Image labels (all visible cells, including anchors): ")
                 .AppendLine(string.Join(
                     ", ",
                     sheet.Labels.Select(
@@ -1036,14 +1084,12 @@ namespace TilePaletteLayoutStudio
                             .ToString("D2") +
                             "=" + id)));
 
-            builder.AppendLine(
-                "Optional filename hints:");
+            builder.AppendLine("Optional filename hints:");
 
             foreach (SourceSpriteInfo source
                      in request.sources.sprites
                          .OrderBy(
-                             value =>
-                                 value.analysisId,
+                             value => value.analysisId,
                              StringComparer.Ordinal))
             {
                 builder.Append(source.analysisId)
@@ -1194,10 +1240,13 @@ namespace TilePaletteLayoutStudio
         {
             if (current.Count == 0) return;
 
+            bool continuation = batches.Count > 0;
             batches.Add(new VisionAnalysisBatch(
                 current.ToArray(),
-                string.Empty,
-                false));
+                continuation
+                    ? GlobalContinuationKey
+                    : string.Empty,
+                continuation));
             current.Clear();
         }
 
