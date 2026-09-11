@@ -23,8 +23,8 @@ namespace TilePaletteLayoutStudio
                 ValidateNameHints();
                 report.Add("PASS Optional name hints");
 
-                ValidateVisionProviders();
-                report.Add("PASS Vision provider discovery");
+                ValidateLocalVisionClient();
+                report.Add("PASS Local vision client configuration");
 
                 TilePaletteProfile profile = TilePaletteProfileStore.LoadPreferred();
                 if (profile != null && AssetDatabase.IsValidFolder(profile.SourceFolderPath))
@@ -85,27 +85,28 @@ namespace TilePaletteLayoutStudio
                 "Name hint parser returned unexpected data for " + value);
         }
 
-        private static void ValidateVisionProviders()
+        private static void ValidateLocalVisionClient()
         {
-            Require(TilePaletteVisionProviderRegistry.Providers.Count > 0, "No vision provider was discovered.");
-            string duplicate = TilePaletteVisionProviderRegistry.Providers
-                .GroupBy(provider => provider.Id, StringComparer.Ordinal)
-                .Where(group => group.Count() > 1)
-                .Select(group => group.Key)
-                .FirstOrDefault();
-            Require(string.IsNullOrEmpty(duplicate), "Duplicate vision provider ID: " + duplicate);
-            foreach (ITilePaletteVisionProvider provider in TilePaletteVisionProviderRegistry.Providers)
-            {
-                Require(!string.IsNullOrWhiteSpace(provider.Endpoint), provider.DisplayName + " has no endpoint.");
-                Require(!string.IsNullOrWhiteSpace(provider.Model), provider.DisplayName + " has no model ID.");
-                Require(!string.IsNullOrWhiteSpace(provider.ApiKeyEnvironment), provider.DisplayName + " has no API Key environment name.");
-            }
+            Require(
+                Uri.TryCreate(OllamaVisionClient.BaseUrl, UriKind.Absolute, out Uri endpoint) &&
+                endpoint.Scheme == Uri.UriSchemeHttp,
+                "Ollama base URL is invalid.");
+            Require(
+                !string.IsNullOrWhiteSpace(OllamaVisionClient.Model),
+                "Ollama model name is empty.");
+            Require(
+                TilePaletteVisionAnalyzer.MaximumSpritesPerRequest >
+                TilePaletteVisionAnalyzer.AnchorSpritesPerContinuation,
+                "Vision batch capacity must be larger than the continuation anchor count.");
         }
 
         private static void WriteReport(IEnumerable<string> lines)
         {
-            string root = Directory.GetParent(Application.dataPath)?.FullName ?? throw new InvalidOperationException("Cannot resolve project root.");
-            string folder = Path.Combine(root, StudioConstants.ReportFolder.Replace('/', Path.DirectorySeparatorChar));
+            string root = Directory.GetParent(Application.dataPath)?.FullName ??
+                          throw new InvalidOperationException("Cannot resolve project root.");
+            string folder = Path.Combine(
+                root,
+                StudioConstants.ReportFolder.Replace('/', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(folder);
             File.WriteAllLines(Path.Combine(folder, "latest.txt"), lines);
         }
