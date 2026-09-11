@@ -269,10 +269,6 @@ namespace TilePaletteLayoutStudio
                     MessageType.Warning);
             }
 
-            EditorGUILayout.LabelField(
-                "Confidence",
-                analyzedLayout.confidence.ToString("P0"));
-
             foreach (
                 IGrouping<string, AnalyzedLayoutPlacement> group
                 in analyzedLayout.placements
@@ -408,14 +404,6 @@ namespace TilePaletteLayoutStudio
                                 previewIsStale = false;
                                 Debug.Log(
                                     "[TilePalette] 分析完成（本地 Ollama）");
-
-                                if (analyzedLayout != null &&
-                                    analyzedLayout.confidence <
-                                    0.65f)
-                                {
-                                    Debug.LogWarning(
-                                        "[TilePalette] 视觉布局置信度较低，请检查二维预览。");
-                                }
                                 break;
 
                             case VisionAnalysisStatus.Cancelled:
