@@ -67,51 +67,65 @@ namespace TilePaletteLayoutStudio.Tests
         }
 
         [Test]
-        public void GlmProvider_UsesOfficialChatImageShape()
+        public void OllamaClient_BuildsGenerateRequestWithImageAndSchema()
         {
-            ZhipuGlmVisionProvider provider = new ZhipuGlmVisionProvider();
-            VisionProviderRequest request = provider.CreateRequest(
-                "test-key",
-                "layout",
-                new[] { new byte[] { 1, 2, 3 } },
-                120);
+            const string schema =
+                "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}}}";
 
-            Assert.That(provider.Model, Is.EqualTo("glm-4.6v-flash"));
-            Assert.That(request.Url, Is.EqualTo(provider.Endpoint));
-            Assert.That(request.Json, Does.Contain("\"type\":\"image_url\""));
-            Assert.That(
-                request.Json,
-                Does.Contain("\"url\":\"data:image/png;base64,AQID\""));
-            Assert.That(request.Headers["Authorization"], Is.EqualTo("Bearer test-key"));
-            Assert.That(request.TimeoutSeconds, Is.EqualTo(120));
+            string json = OllamaVisionClient.BuildGenerateRequestJson(
+                "system",
+                "prompt",
+                new byte[] { 1, 2, 3 },
+                schema);
+
+            Assert.That(OllamaVisionClient.Model, Is.EqualTo("qwen2.5vl:7b"));
+            Assert.That(json, Does.Contain("\"model\":\"qwen2.5vl:7b\""));
+            Assert.That(json, Does.Contain("\"images\":[\"AQID\"]"));
+            Assert.That(json, Does.Contain("\"stream\":false"));
+            Assert.That(json, Does.Contain("\"temperature\":0.0"));
+            Assert.That(json, Does.Contain("\"format\":{\"type\":\"object\""));
         }
 
         [Test]
-        public void VisionHttpClient_DoesNotRetryProviderOverload1305()
+        public void OllamaClient_DetectsRequiredModelInTags()
         {
-            const string overload =
-                "{\"error\":{\"code\":\"1305\",\"message\":\"model overloaded\"}}";
+            string json =
+                "{\"models\":[" +
+                "{\"name\":\"qwen2.5vl:7b\",\"model\":\"qwen2.5vl:7b\"}," +
+                "{\"name\":\"nomic-embed-text:latest\",\"model\":\"nomic-embed-text:latest\"}" +
+                "]}";
 
             Assert.That(
-                TilePaletteVisionHttpClient.IsProviderOverloaded(overload),
+                OllamaVisionClient.HasRequiredModel(json),
                 Is.True);
             Assert.That(
-                TilePaletteVisionHttpClient.IsRetryableResponse(429, overload),
+                OllamaVisionClient.HasRequiredModel("{\"models\":[]}"),
                 Is.False);
-            Assert.That(
-                TilePaletteVisionHttpClient.IsRetryableResponse(
-                    429,
-                    "{\"error\":{\"code\":\"rate_limit\"}}"),
-                Is.True);
-            Assert.That(
-                TilePaletteVisionHttpClient.IsRetryableResponse(503, string.Empty),
-                Is.True);
+        }
+
+        [Test]
+        public void OllamaClient_ParsesGenerateResponse()
+        {
+            string json =
+                "{\"response\":\"{\\\"confidence\\\":1,\\\"groups\\\":[]}\"," +
+                "\"done\":true," +
+                "\"total_duration\":1200000," +
+                "\"load_duration\":300000}";
+
+            OllamaGenerateResult result =
+                OllamaVisionClient.ParseGenerateResponse(json);
+
+            Assert.That(result.Status, Is.EqualTo(OllamaClientStatus.Success));
+            Assert.That(result.Content, Does.Contain("\"confidence\":1"));
+            Assert.That(result.TotalDurationNanoseconds, Is.EqualTo(1200000));
+            Assert.That(result.LoadDurationNanoseconds, Is.EqualTo(300000));
         }
 
         [Test]
         public void ManagedCells_DoNotIncludeLayoutHoles()
         {
-            TilePaletteProfile profile = ScriptableObject.CreateInstance<TilePaletteProfile>();
+            TilePaletteProfile profile =
+                ScriptableObject.CreateInstance<TilePaletteProfile>();
             try
             {
                 profile.ReplaceGroups(new[]
@@ -154,15 +168,6 @@ namespace TilePaletteLayoutStudio.Tests
         }
 
         [Test]
-        public void ProviderRegistry_DiscoversGlmPlugin()
-        {
-            Assert.That(
-                TilePaletteVisionProviderRegistry.Providers.Any(
-                    provider => provider is ZhipuGlmVisionProvider),
-                Is.True);
-        }
-
-        [Test]
         public void VisionAnalyzer_KeepsSmallNameGroupsTogether()
         {
             List<SourceSpriteInfo> sources = Enumerable
@@ -199,19 +204,63 @@ namespace TilePaletteLayoutStudio.Tests
             IReadOnlyList<VisionAnalysisBatch> batches =
                 TilePaletteVisionAnalyzer.BuildAnalysisBatches(sources);
 
-            Assert.That(batches, Has.Count.EqualTo(3));
-            Assert.That(batches[0].NewSources, Has.Count.EqualTo(36));
+            Assert.That(batches, Has.Count.EqualTo(4));
+            Assert.That(batches[0].NewSources, Has.Count.EqualTo(24));
             Assert.That(batches[0].RequiresAnchors, Is.False);
-            Assert.That(batches[1].NewSources, Has.Count.EqualTo(30));
+            Assert.That(batches[1].NewSources, Has.Count.EqualTo(18));
             Assert.That(batches[1].RequiresAnchors, Is.True);
-            Assert.That(batches[2].NewSources, Has.Count.EqualTo(7));
+            Assert.That(batches[2].NewSources, Has.Count.EqualTo(18));
             Assert.That(batches[2].RequiresAnchors, Is.True);
+            Assert.That(batches[3].NewSources, Has.Count.EqualTo(13));
+            Assert.That(batches[3].RequiresAnchors, Is.True);
             Assert.That(
-                batches.Skip(1).All(batch => batch.ContinuationKey == "large"),
+                batches.Skip(1).All(
+                    batch => batch.ContinuationKey == "large"),
                 Is.True);
             Assert.That(
                 batches.Sum(batch => batch.NewSources.Count),
                 Is.EqualTo(73));
+        }
+
+        [Test]
+        public void VisionAnalyzer_ResponseSchemaRestrictsIds()
+        {
+            string schema =
+                TilePaletteVisionAnalyzer.BuildResponseSchema(
+                    new[]
+                    {
+                        Source("group", 1),
+                        Source("group", 2)
+                    });
+
+            Assert.That(schema, Does.Contain("\"enum\":[\"T0001\",\"T0002\"]"));
+            Assert.That(schema, Does.Contain("\"additionalProperties\":false"));
+            Assert.That(schema, Does.Not.Contain("T0003"));
+        }
+
+        [Test]
+        public void VisionAnalyzer_ParsesSimplifiedStructuredOutput()
+        {
+            SourceScanResult sources = new SourceScanResult();
+            sources.sprites.Add(Source("group", 1));
+            sources.sprites.Add(Source("group", 2));
+
+            string json =
+                "{\"confidence\":0.9,\"groups\":[{" +
+                "\"group\":\"object\",\"subgroup\":\"main\",\"entries\":[" +
+                "{\"id\":\"T0001\",\"x\":0,\"y\":0}," +
+                "{\"id\":\"T0002\",\"x\":1,\"y\":0}" +
+                "]}]}";
+
+            AnalyzedLayout layout =
+                TilePaletteVisionAnalyzer.ParseLayoutText(json, sources);
+
+            Assert.That(layout.placements, Has.Count.EqualTo(2));
+            Assert.That(layout.confidence, Is.EqualTo(0.9f).Within(0.001f));
+            Assert.That(
+                layout.placements.Single(
+                    value => value.resourceId == "resource-2").localPosition,
+                Is.EqualTo(new Vector3Int(1, 0, 0)));
         }
 
         [Test]
@@ -312,12 +361,14 @@ namespace TilePaletteLayoutStudio.Tests
         {
             Color32 background = new Color32(32, 35, 40, 255);
 
-            Color32 transparent = TilePaletteContactSheetRenderer.CompositeOver(
-                new Color32(255, 0, 0, 0),
-                background);
-            Color32 half = TilePaletteContactSheetRenderer.CompositeOver(
-                new Color32(255, 0, 0, 128),
-                background);
+            Color32 transparent =
+                TilePaletteContactSheetRenderer.CompositeOver(
+                    new Color32(255, 0, 0, 0),
+                    background);
+            Color32 half =
+                TilePaletteContactSheetRenderer.CompositeOver(
+                    new Color32(255, 0, 0, 128),
+                    background);
 
             Assert.That(transparent.a, Is.EqualTo(255));
             Assert.That(transparent.r, Is.EqualTo(background.r));
@@ -340,18 +391,27 @@ namespace TilePaletteLayoutStudio.Tests
                         source.sourceId = "sprite-" + index;
                         return source;
                     }));
+
             string json =
-                "{\"confidence\":1,\"groups\":[{\"group\":\"group\"," +
-                "\"subgroup\":\"main\",\"width\":1,\"height\":1," +
-                "\"entries\":[{\"id\":\"T0001\",\"x\":0,\"y\":0}]}]}";
+                "{\"confidence\":1,\"groups\":[{" +
+                "\"group\":\"group\",\"subgroup\":\"main\",\"entries\":[" +
+                "{\"id\":\"T0001\",\"x\":0,\"y\":0}]}]}";
 
             InvalidOperationException exception =
                 Assert.Throws<InvalidOperationException>(() =>
-                    TilePaletteVisionAnalyzer.ParseLayoutText(json, sources));
+                    TilePaletteVisionAnalyzer.ParseLayoutText(
+                        json,
+                        sources));
 
-            Assert.That(exception.Message, Does.Contain("Missing 9 Sprite IDs"));
-            Assert.That(exception.Message, Does.Contain("(+1 more)"));
-            Assert.That(exception.Message, Does.Not.Contain("T0010"));
+            Assert.That(
+                exception.Message,
+                Does.Contain("Missing 9 Sprite IDs"));
+            Assert.That(
+                exception.Message,
+                Does.Contain("(+1 more)"));
+            Assert.That(
+                exception.Message,
+                Does.Not.Contain("T0010"));
         }
 
         private static AnalyzedLayoutPlacement Placement(
