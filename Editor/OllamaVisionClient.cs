@@ -189,6 +189,9 @@ namespace TilePaletteLayoutStudio
                         OllamaGenerateResult parsed =
                             ParseGenerateResponse(result.Body);
                         parsed.ElapsedMilliseconds = result.ElapsedMilliseconds;
+                        Debug.Log(
+                            "[TilePalette] Ollama timing: " +
+                            FormatTiming(parsed));
                         completed(parsed);
                     }
                     catch (Exception exception)
@@ -301,6 +304,25 @@ namespace TilePaletteLayoutStudio
                 EvalCount = response.eval_count,
                 EvalDurationNanoseconds = response.eval_duration
             };
+        }
+
+        internal static string FormatTiming(OllamaGenerateResult result)
+        {
+            if (result == null) return "no timing data";
+
+            return
+                $"wall={result.ElapsedMilliseconds / 1000d:0.0}s, " +
+                $"total={NanosecondsToSeconds(result.TotalDurationNanoseconds):0.0}s, " +
+                $"load={NanosecondsToSeconds(result.LoadDurationNanoseconds):0.0}s, " +
+                $"prompt={NanosecondsToSeconds(result.PromptEvalDurationNanoseconds):0.0}s " +
+                $"({result.PromptEvalCount} tokens), " +
+                $"generate={NanosecondsToSeconds(result.EvalDurationNanoseconds):0.0}s " +
+                $"({result.EvalCount} tokens)";
+        }
+
+        private static double NanosecondsToSeconds(long nanoseconds)
+        {
+            return nanoseconds / 1000000000d;
         }
 
         private static string AddRawProperty(
