@@ -10,7 +10,7 @@ namespace TilePaletteLayoutStudio
     internal static class TilePaletteVisionSettings
     {
         private const string TimeoutPreference = "TilePaletteLayoutStudio.VisionTimeout";
-        public const int DefaultTimeoutSeconds = 120;
+        public const int DefaultTimeoutSeconds = 60;
 
         public static int TimeoutSeconds
         {
