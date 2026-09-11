@@ -45,7 +45,7 @@ namespace TilePaletteLayoutStudio
         internal const int ReadyTimeoutSeconds = 5;
         internal const int GenerateTimeoutSeconds = 120;
         internal const int ContextWindow = 4096;
-        internal const int MaximumPredictedTokens = 2048;
+        internal const int MaximumPredictedTokens = 1536;
         private const string KeepAlive = "2m";
 
         private static string TagsUrl => BaseUrl + "/api/tags";
@@ -197,7 +197,7 @@ namespace TilePaletteLayoutStudio
                         if (parsed.Status == OllamaClientStatus.Success &&
                             orderedIds.Length > 0)
                         {
-                            parsed.Content = ExpandPositionalResponse(
+                            parsed.Content = ExpandParallelResponse(
                                 parsed.Content,
                                 orderedIds);
                         }
@@ -270,14 +270,14 @@ namespace TilePaletteLayoutStudio
                     "Response schema is empty.");
 
             string[] orderedIds = ExtractOrderedIds(responseSchemaJson);
-            bool usePositionalOutput = orderedIds.Length > 0;
+            bool useParallelOutput = orderedIds.Length > 0;
             string effectivePrompt = prompt ?? string.Empty;
             string effectiveSchema = responseSchemaJson;
 
-            if (usePositionalOutput)
+            if (useParallelOutput)
             {
-                effectivePrompt += BuildPositionalPromptSuffix(orderedIds);
-                effectiveSchema = BuildPositionalResponseSchema(
+                effectivePrompt += BuildParallelPromptSuffix(orderedIds);
+                effectiveSchema = BuildParallelResponseSchema(
                     orderedIds.Length);
             }
 
@@ -333,43 +333,28 @@ namespace TilePaletteLayoutStudio
             return ids.ToArray();
         }
 
-        internal static string BuildPositionalResponseSchema(int count)
+        internal static string BuildParallelResponseSchema(int count)
         {
             if (count <= 0)
                 throw new ArgumentOutOfRangeException(nameof(count));
 
+            string arrayPrefix =
+                "{\"type\":\"array\",\"minItems\":" + count +
+                ",\"maxItems\":" + count + ",\"items\":";
+
             return
                 "{\"type\":\"object\"," +
                 "\"properties\":{" +
-                    "\"c\":{" +
-                        "\"type\":\"number\"," +
-                        "\"minimum\":0," +
-                        "\"maximum\":1}," +
-                    "\"p\":{" +
-                        "\"type\":\"array\"," +
-                        "\"minItems\":" + count + "," +
-                        "\"maxItems\":" + count + "," +
-                        "\"items\":{" +
-                            "\"type\":\"object\"," +
-                            "\"properties\":{" +
-                                "\"g\":{" +
-                                    "\"type\":\"integer\"," +
-                                    "\"minimum\":0}," +
-                                "\"s\":{" +
-                                    "\"type\":\"integer\"," +
-                                    "\"minimum\":0}," +
-                                "\"x\":{" +
-                                    "\"type\":\"integer\"}," +
-                                "\"y\":{" +
-                                    "\"type\":\"integer\"}" +
-                            "}," +
-                            "\"required\":[" +
-                                "\"g\",\"s\",\"x\",\"y\"]," +
-                            "\"additionalProperties\":false" +
-                        "}" +
-                    "}" +
+                    "\"g\":" + arrayPrefix +
+                        "{\"type\":\"integer\",\"minimum\":0}}," +
+                    "\"s\":" + arrayPrefix +
+                        "{\"type\":\"integer\",\"minimum\":0}}," +
+                    "\"x\":" + arrayPrefix +
+                        "{\"type\":\"integer\",\"minimum\":-64,\"maximum\":64}}," +
+                    "\"y\":" + arrayPrefix +
+                        "{\"type\":\"integer\",\"minimum\":-64,\"maximum\":64}}" +
                 "}," +
-                "\"required\":[\"c\",\"p\"]," +
+                "\"required\":[\"g\",\"s\",\"x\",\"y\"]," +
                 "\"additionalProperties\":false}";
         }
 
@@ -415,46 +400,49 @@ namespace TilePaletteLayoutStudio
             return result;
         }
 
-        internal static string ExpandPositionalResponse(
+        internal static string ExpandParallelResponse(
             string content,
             IReadOnlyList<string> orderedIds)
         {
             if (orderedIds == null || orderedIds.Count == 0)
                 return content ?? string.Empty;
 
-            PositionalEnvelope compact =
-                JsonUtility.FromJson<PositionalEnvelope>(content);
-            if (compact?.p == null)
+            ParallelEnvelope compact =
+                JsonUtility.FromJson<ParallelEnvelope>(content);
+            if (compact == null)
                 throw new InvalidOperationException(
-                    "Compact response does not contain p.");
-            if (compact.p.Length != orderedIds.Count)
+                    "Compact response is empty.");
+
+            int count = orderedIds.Count;
+            if (compact.g == null || compact.g.Length != count ||
+                compact.s == null || compact.s.Length != count ||
+                compact.x == null || compact.x.Length != count ||
+                compact.y == null || compact.y.Length != count)
+            {
                 throw new InvalidOperationException(
-                    $"Compact response count mismatch: expected " +
-                    $"{orderedIds.Count}, got {compact.p.Length}.");
+                    "Compact response arrays must all match the required ID count.");
+            }
 
             ExpandedPlacement[] placements =
-                new ExpandedPlacement[orderedIds.Count];
+                new ExpandedPlacement[count];
 
-            for (int index = 0; index < orderedIds.Count; index++)
+            for (int index = 0; index < count; index++)
             {
-                PositionalPlacement entry = compact.p[index];
-                if (entry == null)
-                    throw new InvalidOperationException(
-                        $"Compact response placement {index + 1} is null.");
-
                 placements[index] = new ExpandedPlacement
                 {
                     id = orderedIds[index],
-                    group = "g" + entry.g,
-                    subgroup = "s" + entry.s,
-                    x = entry.x,
-                    y = entry.y
+                    group = "g" + compact.g[index],
+                    subgroup = "s" + compact.s[index],
+                    x = compact.x[index],
+                    y = compact.y[index]
                 };
             }
 
+            // The analyzer still accepts the legacy envelope shape internally,
+            // but confidence is no longer requested from or shown to users.
             return JsonUtility.ToJson(new ExpandedEnvelope
             {
-                confidence = compact.c,
+                confidence = 1f,
                 placements = placements
             });
         }
@@ -477,20 +465,23 @@ namespace TilePaletteLayoutStudio
                 $"({result.EvalCount} tokens)" + stop;
         }
 
-        private static string BuildPositionalPromptSuffix(
+        private static string BuildParallelPromptSuffix(
             IReadOnlyList<string> orderedIds)
         {
             return
-                "\nOutput compact positional JSON only. p must contain exactly " +
+                "\nOutput compact parallel-array JSON only. Arrays g,s,x,y must each contain exactly " +
                 orderedIds.Count +
-                " items in this exact ID order: " +
+                " integers in this exact ID order: " +
                 string.Join(",", orderedIds) +
-                ". Do not output IDs inside p. p[0] belongs to the first ID, " +
-                "p[1] to the second, and so on. Each p item contains only " +
-                "integer g,s,x,y. Use small non-negative integers for g and s; " +
-                "reuse the same g/s pair for pieces in the same subgroup. " +
-                "If an anchor says group=gN and subgroup=sM, output g=N and s=M. " +
-                "Return no prose.";
+                ". Array index 0 belongs to the first ID, index 1 to the second, and so on. " +
+                "Use small non-negative integers for g and s and reuse the same g/s pair only for tiles " +
+                "that form one coherent visual structure or variant. Start a new subgroup instead of " +
+                "separating unrelated tiles with large coordinate gaps. Coordinates are grid cells: keep " +
+                "each subgroup compact, prefer direct 4-neighbor adjacency, and avoid empty rows or columns " +
+                "unless the artwork clearly requires a real hole. Contact-sheet row, column, and item order " +
+                "are arbitrary display choices and must never be copied into x/y. Infer adjacency from tile " +
+                "content, matching edges, seams, silhouettes, and filename hints. If an anchor says group=gN " +
+                "and subgroup=sM, output g=N and s=M for new tiles that continue that structure. Return no prose.";
         }
 
         private static double NanosecondsToSeconds(long nanoseconds)
@@ -549,19 +540,12 @@ namespace TilePaletteLayoutStudio
         }
 
         [Serializable]
-        private sealed class PositionalEnvelope
+        private sealed class ParallelEnvelope
         {
-            public float c;
-            public PositionalPlacement[] p;
-        }
-
-        [Serializable]
-        private sealed class PositionalPlacement
-        {
-            public int g;
-            public int s;
-            public int x;
-            public int y;
+            public int[] g;
+            public int[] s;
+            public int[] x;
+            public int[] y;
         }
 
         [Serializable]
