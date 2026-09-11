@@ -38,7 +38,9 @@ namespace TilePaletteLayoutStudio.Tests
                 }
             };
 
-            bool valid = layout.TryValidate(new[] { "sprite-a", "sprite-b" }, out string diagnostic);
+            bool valid = layout.TryValidate(
+                new[] { "sprite-a", "sprite-b" },
+                out string diagnostic);
 
             Assert.That(valid, Is.False);
             Assert.That(diagnostic, Does.Contain("遗漏"));
@@ -56,7 +58,9 @@ namespace TilePaletteLayoutStudio.Tests
                 }
             };
 
-            bool valid = layout.TryValidate(new[] { "sprite-a", "sprite-b" }, out string diagnostic);
+            bool valid = layout.TryValidate(
+                new[] { "sprite-a", "sprite-b" },
+                out string diagnostic);
 
             Assert.That(valid, Is.False);
             Assert.That(diagnostic, Does.Contain("坐标冲突"));
@@ -96,14 +100,30 @@ namespace TilePaletteLayoutStudio.Tests
                         subgroupName = "main",
                         entries = new List<TilePaletteProfileEntry>
                         {
-                            new TilePaletteProfileEntry { included = true, localPosition = new Vector3Int(0, 0, 0) },
-                            new TilePaletteProfileEntry { included = true, localPosition = new Vector3Int(2, 0, 0) }
+                            new TilePaletteProfileEntry
+                            {
+                                included = true,
+                                localPosition = new Vector3Int(0, 0, 0)
+                            },
+                            new TilePaletteProfileEntry
+                            {
+                                included = true,
+                                localPosition = new Vector3Int(2, 0, 0)
+                            }
                         }
                     }
                 });
 
-                Assert.That(TilePaletteProfileUtility.IsManagedCell(profile, new Vector3Int(0, 0, 0)), Is.True);
-                Assert.That(TilePaletteProfileUtility.IsManagedCell(profile, new Vector3Int(1, 0, 0)), Is.False);
+                Assert.That(
+                    TilePaletteProfileUtility.IsManagedCell(
+                        profile,
+                        new Vector3Int(0, 0, 0)),
+                    Is.True);
+                Assert.That(
+                    TilePaletteProfileUtility.IsManagedCell(
+                        profile,
+                        new Vector3Int(1, 0, 0)),
+                    Is.False);
             }
             finally
             {
@@ -115,7 +135,8 @@ namespace TilePaletteLayoutStudio.Tests
         public void ProviderRegistry_DiscoversGlmPlugin()
         {
             Assert.That(
-                TilePaletteVisionProviderRegistry.Providers.Any(provider => provider is ZhipuGlmVisionProvider),
+                TilePaletteVisionProviderRegistry.Providers.Any(
+                    provider => provider is ZhipuGlmVisionProvider),
                 Is.True);
         }
 
@@ -125,7 +146,9 @@ namespace TilePaletteLayoutStudio.Tests
             List<SourceSpriteInfo> sources = Enumerable
                 .Range(1, 20)
                 .Select(index => Source("first", index))
-                .Concat(Enumerable.Range(21, 20).Select(index => Source("second", index)))
+                .Concat(
+                    Enumerable.Range(21, 20)
+                        .Select(index => Source("second", index)))
                 .ToList();
 
             IReadOnlyList<IReadOnlyList<SourceSpriteInfo>> batches =
@@ -133,54 +156,186 @@ namespace TilePaletteLayoutStudio.Tests
 
             Assert.That(batches, Has.Count.EqualTo(2));
             Assert.That(batches.All(batch => batch.Count == 20), Is.True);
-            Assert.That(batches.Any(batch => batch.All(source => source.groupName == "first")), Is.True);
-            Assert.That(batches.Any(batch => batch.All(source => source.groupName == "second")), Is.True);
+            Assert.That(
+                batches.Any(batch =>
+                    batch.All(source => source.groupName == "first")),
+                Is.True);
+            Assert.That(
+                batches.Any(batch =>
+                    batch.All(source => source.groupName == "second")),
+                Is.True);
         }
 
         [Test]
-        public void VisionAnalyzer_SplitsLargeGroupsAtRequestLimit()
+        public void VisionAnalyzer_SplitsLargeGroupsWithContinuationCapacity()
         {
             List<SourceSpriteInfo> sources = Enumerable
                 .Range(1, 73)
                 .Select(index => Source("large", index))
                 .ToList();
 
-            IReadOnlyList<IReadOnlyList<SourceSpriteInfo>> batches =
-                TilePaletteVisionAnalyzer.BuildBatches(sources);
+            IReadOnlyList<VisionAnalysisBatch> batches =
+                TilePaletteVisionAnalyzer.BuildAnalysisBatches(sources);
 
             Assert.That(batches, Has.Count.EqualTo(3));
-            Assert.That(batches.All(
-                batch => batch.Count <= TilePaletteVisionAnalyzer.MaximumSpritesPerRequest), Is.True);
-            Assert.That(batches.Sum(batch => batch.Count), Is.EqualTo(73));
+            Assert.That(batches[0].NewSources, Has.Count.EqualTo(36));
+            Assert.That(batches[0].RequiresAnchors, Is.False);
+            Assert.That(batches[1].NewSources, Has.Count.EqualTo(30));
+            Assert.That(batches[1].RequiresAnchors, Is.True);
+            Assert.That(batches[2].NewSources, Has.Count.EqualTo(7));
+            Assert.That(batches[2].RequiresAnchors, Is.True);
+            Assert.That(
+                batches.Skip(1).All(batch => batch.ContinuationKey == "large"),
+                Is.True);
+            Assert.That(
+                batches.Sum(batch => batch.NewSources.Count),
+                Is.EqualTo(73));
+        }
+
+        [Test]
+        public void VisionAnalyzer_RejectsMovedContinuationAnchor()
+        {
+            SourceSpriteInfo source = Source("large", 1);
+            source.resourceId = "resource-anchor";
+            source.sourceId = "anchor";
+            VisionAnchor anchor = new VisionAnchor(
+                source,
+                "object",
+                "main",
+                Vector3Int.zero);
+            AnalyzedLayout batch = new AnalyzedLayout
+            {
+                placements = new List<AnalyzedLayoutPlacement>
+                {
+                    new AnalyzedLayoutPlacement
+                    {
+                        resourceId = source.resourceId,
+                        sourceId = source.sourceId,
+                        groupName = "object",
+                        subgroupName = "main",
+                        localPosition = new Vector3Int(1, 0, 0)
+                    }
+                }
+            };
+
+            InvalidOperationException exception =
+                Assert.Throws<InvalidOperationException>(() =>
+                    TilePaletteVisionAnalyzer.ValidateAnchors(
+                        batch,
+                        new[] { anchor }));
+
+            Assert.That(exception.Message, Does.Contain("anchor moved"));
+        }
+
+        [Test]
+        public void VisionAnalyzer_MergesContinuationWithoutBatchRenaming()
+        {
+            AnalyzedLayout target = new AnalyzedLayout
+            {
+                placements = new List<AnalyzedLayoutPlacement>
+                {
+                    new AnalyzedLayoutPlacement
+                    {
+                        resourceId = "resource-anchor",
+                        sourceId = "anchor",
+                        groupName = "object",
+                        subgroupName = "main",
+                        localPosition = Vector3Int.zero
+                    }
+                }
+            };
+            AnalyzedLayout batch = new AnalyzedLayout
+            {
+                placements = new List<AnalyzedLayoutPlacement>
+                {
+                    new AnalyzedLayoutPlacement
+                    {
+                        resourceId = "resource-anchor",
+                        sourceId = "anchor",
+                        groupName = "object",
+                        subgroupName = "main",
+                        localPosition = Vector3Int.zero
+                    },
+                    new AnalyzedLayoutPlacement
+                    {
+                        resourceId = "resource-new",
+                        sourceId = "new",
+                        groupName = "object",
+                        subgroupName = "main",
+                        localPosition = new Vector3Int(1, 0, 0)
+                    }
+                }
+            };
+
+            TilePaletteVisionAnalyzer.MergeBatch(
+                target,
+                batch,
+                1,
+                new[] { "resource-anchor" },
+                true);
+
+            Assert.That(target.placements, Has.Count.EqualTo(2));
+            Assert.That(
+                target.placements.Single(value =>
+                    value.resourceId == "resource-new").subgroupName,
+                Is.EqualTo("main"));
+            Assert.That(
+                target.placements.Any(value =>
+                    value.subgroupName.Contains("_batch_")),
+                Is.False);
+        }
+
+        [Test]
+        public void ContactSheet_CompositeOverAlwaysProducesOpaquePixel()
+        {
+            Color32 background = new Color32(32, 35, 40, 255);
+
+            Color32 transparent = TilePaletteContactSheetRenderer.CompositeOver(
+                new Color32(255, 0, 0, 0),
+                background);
+            Color32 half = TilePaletteContactSheetRenderer.CompositeOver(
+                new Color32(255, 0, 0, 128),
+                background);
+
+            Assert.That(transparent.a, Is.EqualTo(255));
+            Assert.That(transparent.r, Is.EqualTo(background.r));
+            Assert.That(transparent.g, Is.EqualTo(background.g));
+            Assert.That(transparent.b, Is.EqualTo(background.b));
+            Assert.That(half.a, Is.EqualTo(255));
+            Assert.That(half.r, Is.GreaterThan(background.r));
         }
 
         [Test]
         public void VisionAnalyzer_ReportsMissingIdsBriefly()
         {
             SourceScanResult sources = new SourceScanResult();
-            sources.sprites.AddRange(Enumerable
-                .Range(1, 10)
-                .Select(index =>
-                {
-                    SourceSpriteInfo source = Source("group", index);
-                    source.resourceId = "resource-" + index;
-                    source.sourceId = "sprite-" + index;
-                    return source;
-                }));
+            sources.sprites.AddRange(
+                Enumerable.Range(1, 10)
+                    .Select(index =>
+                    {
+                        SourceSpriteInfo source = Source("group", index);
+                        source.resourceId = "resource-" + index;
+                        source.sourceId = "sprite-" + index;
+                        return source;
+                    }));
             string json =
                 "{\"confidence\":1,\"groups\":[{\"group\":\"group\"," +
                 "\"subgroup\":\"main\",\"width\":1,\"height\":1," +
                 "\"entries\":[{\"id\":\"T0001\",\"x\":0,\"y\":0}]}]}";
 
-            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => TilePaletteVisionAnalyzer.ParseLayoutText(json, sources));
+            InvalidOperationException exception =
+                Assert.Throws<InvalidOperationException>(() =>
+                    TilePaletteVisionAnalyzer.ParseLayoutText(json, sources));
 
             Assert.That(exception.Message, Does.Contain("Missing 9 Sprite IDs"));
             Assert.That(exception.Message, Does.Contain("(+1 more)"));
             Assert.That(exception.Message, Does.Not.Contain("T0010"));
         }
 
-        private static AnalyzedLayoutPlacement Placement(string resourceId, string group, Vector3Int position) =>
+        private static AnalyzedLayoutPlacement Placement(
+            string resourceId,
+            string group,
+            Vector3Int position) =>
             new AnalyzedLayoutPlacement
             {
                 resourceId = resourceId,
@@ -189,9 +344,13 @@ namespace TilePaletteLayoutStudio.Tests
                 localPosition = position
             };
 
-        private static SourceSpriteInfo Source(string groupName, int index) =>
+        private static SourceSpriteInfo Source(
+            string groupName,
+            int index) =>
             new SourceSpriteInfo
             {
+                resourceId = "resource-" + index,
+                sourceId = "sprite-" + index,
                 analysisId = "T" + index.ToString("D4"),
                 groupName = groupName
             };
