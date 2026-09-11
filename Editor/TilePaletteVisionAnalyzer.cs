@@ -305,9 +305,9 @@ namespace TilePaletteLayoutStudio
         {
             AiEnvelope envelope = JsonUtility.FromJson<AiEnvelope>(
                 StripCodeFence(content));
-            if (envelope?.groups == null || envelope.groups.Length == 0)
+            if (envelope?.placements == null || envelope.placements.Length == 0)
                 throw new InvalidOperationException(
-                    "JSON does not contain groups.");
+                    "JSON does not contain placements.");
 
             Dictionary<string, SourceSpriteInfo> known = sources.sprites
                 .ToDictionary(
@@ -315,6 +315,9 @@ namespace TilePaletteLayoutStudio
                     StringComparer.Ordinal);
             HashSet<string> seenIds =
                 new HashSet<string>(StringComparer.Ordinal);
+            Dictionary<string, HashSet<Vector2Int>> positionsByGroup =
+                new Dictionary<string, HashSet<Vector2Int>>(
+                    StringComparer.Ordinal);
 
             AnalyzedLayout layout = new AnalyzedLayout
             {
@@ -322,68 +325,55 @@ namespace TilePaletteLayoutStudio
                 confidence = Mathf.Clamp01(envelope.confidence)
             };
 
-            foreach (AiGroup group in envelope.groups)
+            foreach (AiPlacement entry in envelope.placements)
             {
-                if (group?.entries == null ||
-                    group.entries.Length == 0 ||
-                    string.IsNullOrWhiteSpace(group.group))
+                if (entry == null ||
+                    !known.TryGetValue(
+                        entry.id,
+                        out SourceSpriteInfo source))
                     throw new InvalidOperationException(
-                        "A group definition is incomplete.");
+                        "Unknown Sprite ID: " + entry?.id);
+
+                if (string.IsNullOrWhiteSpace(entry.group))
+                    throw new InvalidOperationException(
+                        "A placement has no group: " + entry.id);
+
+                if (!seenIds.Add(entry.id))
+                    throw new InvalidOperationException(
+                        "Duplicate Sprite ID: " + entry.id);
 
                 string subgroup =
-                    string.IsNullOrWhiteSpace(group.subgroup)
+                    string.IsNullOrWhiteSpace(entry.subgroup)
                         ? "main"
-                        : group.subgroup;
-
-                HashSet<Vector2Int> positions =
-                    new HashSet<Vector2Int>();
-
-                foreach (AiEntry entry in group.entries)
+                        : entry.subgroup;
+                string groupKey = GroupKey(entry.group, subgroup);
+                if (!positionsByGroup.TryGetValue(
+                        groupKey,
+                        out HashSet<Vector2Int> positions))
                 {
-                    if (entry == null ||
-                        !known.TryGetValue(
-                            entry.id,
-                            out SourceSpriteInfo source))
-                        throw new InvalidOperationException(
-                            "Unknown Sprite ID: " + entry?.id);
-
-                    if (!seenIds.Add(entry.id))
-                        throw new InvalidOperationException(
-                            "Duplicate Sprite ID: " + entry.id);
-
-                    if (!positions.Add(
-                            new Vector2Int(entry.x, entry.y)))
-                        throw new InvalidOperationException(
-                            $"Coordinate collision in " +
-                            $"{group.group}/{subgroup}.");
-
-                    layout.placements.Add(
-                        new AnalyzedLayoutPlacement
-                        {
-                            resourceId = source.resourceId,
-                            sourceId = source.sourceId,
-                            sprite = source.sprite,
-                            pixels = source.pixels,
-                            assetGuid = source.assetGuid,
-                            localFileId = source.localFileId,
-                            groupName = group.group,
-                            subgroupName = subgroup,
-                            localPosition =
-                                new Vector3Int(entry.x, entry.y, 0)
-                        });
+                    positions = new HashSet<Vector2Int>();
+                    positionsByGroup.Add(groupKey, positions);
                 }
 
-                int minX = group.entries.Min(entry => entry.x);
-                int maxX = group.entries.Max(entry => entry.x);
-                int minY = group.entries.Min(entry => entry.y);
-                int maxY = group.entries.Max(entry => entry.y);
-                int width = maxX - minX + 1;
-                int height = maxY - minY + 1;
+                if (!positions.Add(
+                        new Vector2Int(entry.x, entry.y)))
+                    throw new InvalidOperationException(
+                        $"Coordinate collision in {entry.group}/{subgroup}.");
 
-                layout.diagnostics.Add(
-                    $"AI {group.group}/{subgroup}: " +
-                    $"{width}x{height}, " +
-                    $"{group.entries.Length} sprites");
+                layout.placements.Add(
+                    new AnalyzedLayoutPlacement
+                    {
+                        resourceId = source.resourceId,
+                        sourceId = source.sourceId,
+                        sprite = source.sprite,
+                        pixels = source.pixels,
+                        assetGuid = source.assetGuid,
+                        localFileId = source.localFileId,
+                        groupName = entry.group,
+                        subgroupName = subgroup,
+                        localPosition =
+                            new Vector3Int(entry.x, entry.y, 0)
+                    });
             }
 
             string[] missing = known.Keys
@@ -395,6 +385,26 @@ namespace TilePaletteLayoutStudio
                 throw new InvalidOperationException(
                     $"Missing {missing.Length} Sprite IDs: " +
                     FormatIds(missing));
+
+            foreach (IGrouping<string, AnalyzedLayoutPlacement> group
+                     in layout.placements.GroupBy(
+                         placement => GroupKey(
+                             placement.groupName,
+                             placement.subgroupName),
+                         StringComparer.Ordinal))
+            {
+                int minX = group.Min(entry => entry.localPosition.x);
+                int maxX = group.Max(entry => entry.localPosition.x);
+                int minY = group.Min(entry => entry.localPosition.y);
+                int maxY = group.Max(entry => entry.localPosition.y);
+                int width = maxX - minX + 1;
+                int height = maxY - minY + 1;
+                AnalyzedLayoutPlacement first = group.First();
+
+                layout.diagnostics.Add(
+                    $"AI {first.groupName}/{first.subgroupName}: " +
+                    $"{width}x{height}, {group.Count()} sprites");
+            }
 
             if (!layout.TryValidate(
                     sources.sprites.Select(
@@ -950,17 +960,20 @@ namespace TilePaletteLayoutStudio
                     " Sprites in one contact sheet.");
 
             builder.AppendLine(
+                "Return exactly one placement record for every numbered Sprite in the contact sheet. " +
+                "The placements array must contain exactly " +
+                request.sources.sprites.Count +
+                " records, one for each required Sprite ID, with no omissions or duplicates.");
+
+            builder.AppendLine(
                 "Each Sprite cell has a high-contrast " +
                 "two-digit image label. Use the Image " +
                 "labels mapping to map each cell to the " +
                 "required Sprite ID.");
 
             builder.AppendLine(
-                "Analyze every numbered Sprite. Return " +
-                "every required ID exactly once. Group " +
-                "pieces that visually belong to the same " +
-                "structure, and infer their 2D grid " +
-                "positions.");
+                "For each placement, assign group and subgroup names for pieces that visually belong " +
+                "to the same structure, and infer that Sprite's 2D grid position.");
 
             builder.AppendLine(
                 "Within each subgroup, coordinates must be " +
@@ -1051,18 +1064,16 @@ namespace TilePaletteLayoutStudio
         internal static string BuildResponseSchema(
             IReadOnlyList<SourceSpriteInfo> sources)
         {
+            string[] distinctIds = sources
+                .Select(source => source.analysisId)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToArray();
             string ids = string.Join(
                 ",",
-                sources
-                    .Select(source =>
-                        "\"" +
-                        EscapeJsonString(
-                            source.analysisId) +
-                        "\"")
-                    .Distinct(StringComparer.Ordinal)
-                    .OrderBy(
-                        value => value,
-                        StringComparer.Ordinal));
+                distinctIds.Select(id =>
+                    "\"" + EscapeJsonString(id) + "\""));
+            int count = distinctIds.Length;
 
             return
                 "{\"type\":\"object\"," +
@@ -1071,52 +1082,40 @@ namespace TilePaletteLayoutStudio
                         "\"type\":\"number\"," +
                         "\"minimum\":0," +
                         "\"maximum\":1}," +
-                    "\"groups\":{" +
+                    "\"placements\":{" +
                         "\"type\":\"array\"," +
-                        "\"minItems\":1," +
+                        "\"minItems\":" + count + "," +
+                        "\"maxItems\":" + count + "," +
+                        "\"uniqueItems\":true," +
                         "\"items\":{" +
                             "\"type\":\"object\"," +
                             "\"properties\":{" +
+                                "\"id\":{" +
+                                    "\"type\":\"string\"," +
+                                    "\"enum\":[" + ids + "]}," +
                                 "\"group\":{" +
                                     "\"type\":\"string\"," +
                                     "\"minLength\":1}," +
                                 "\"subgroup\":{" +
                                     "\"type\":\"string\"}," +
-                                "\"entries\":{" +
-                                    "\"type\":\"array\"," +
-                                    "\"minItems\":1," +
-                                    "\"items\":{" +
-                                        "\"type\":\"object\"," +
-                                        "\"properties\":{" +
-                                            "\"id\":{" +
-                                                "\"type\":\"string\"," +
-                                                "\"enum\":[" +
-                                                    ids +
-                                                "]}," +
-                                            "\"x\":{" +
-                                                "\"type\":\"integer\"}," +
-                                            "\"y\":{" +
-                                                "\"type\":\"integer\"}" +
-                                        "}," +
-                                        "\"required\":[" +
-                                            "\"id\"," +
-                                            "\"x\"," +
-                                            "\"y\"]," +
-                                        "\"additionalProperties\":false" +
-                                    "}" +
-                                "}" +
+                                "\"x\":{" +
+                                    "\"type\":\"integer\"}," +
+                                "\"y\":{" +
+                                    "\"type\":\"integer\"}" +
                             "}," +
                             "\"required\":[" +
+                                "\"id\"," +
                                 "\"group\"," +
                                 "\"subgroup\"," +
-                                "\"entries\"]," +
+                                "\"x\"," +
+                                "\"y\"]," +
                             "\"additionalProperties\":false" +
                         "}" +
                     "}" +
                 "}," +
                 "\"required\":[" +
                     "\"confidence\"," +
-                    "\"groups\"]," +
+                    "\"placements\"]," +
                 "\"additionalProperties\":false}";
         }
 
@@ -1303,21 +1302,15 @@ namespace TilePaletteLayoutStudio
         private sealed class AiEnvelope
         {
             public float confidence;
-            public AiGroup[] groups;
+            public AiPlacement[] placements;
         }
 
         [Serializable]
-        private sealed class AiGroup
-        {
-            public string group;
-            public string subgroup;
-            public AiEntry[] entries;
-        }
-
-        [Serializable]
-        private sealed class AiEntry
+        private sealed class AiPlacement
         {
             public string id;
+            public string group;
+            public string subgroup;
             public int x;
             public int y;
         }
