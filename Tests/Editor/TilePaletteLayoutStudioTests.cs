@@ -108,7 +108,7 @@ namespace TilePaletteLayoutStudio.Tests
         public void OllamaClient_ParsesGenerateResponse()
         {
             string json =
-                "{\"response\":\"{\\\"confidence\\\":1,\\\"groups\\\":[]}\"," +
+                "{\"response\":\"{\\\"confidence\\\":1,\\\"placements\\\":[]}\"," +
                 "\"done\":true," +
                 "\"total_duration\":1200000," +
                 "\"load_duration\":300000}";
@@ -224,7 +224,7 @@ namespace TilePaletteLayoutStudio.Tests
         }
 
         [Test]
-        public void VisionAnalyzer_ResponseSchemaRestrictsIds()
+        public void VisionAnalyzer_ResponseSchemaRestrictsIdsAndCount()
         {
             string schema =
                 TilePaletteVisionAnalyzer.BuildResponseSchema(
@@ -234,7 +234,11 @@ namespace TilePaletteLayoutStudio.Tests
                         Source("group", 2)
                     });
 
+            Assert.That(schema, Does.Contain("\"placements\""));
             Assert.That(schema, Does.Contain("\"enum\":[\"T0001\",\"T0002\"]"));
+            Assert.That(schema, Does.Contain("\"minItems\":2"));
+            Assert.That(schema, Does.Contain("\"maxItems\":2"));
+            Assert.That(schema, Does.Contain("\"uniqueItems\":true"));
             Assert.That(schema, Does.Contain("\"additionalProperties\":false"));
             Assert.That(schema, Does.Not.Contain("T0003"));
         }
@@ -247,11 +251,10 @@ namespace TilePaletteLayoutStudio.Tests
             sources.sprites.Add(Source("group", 2));
 
             string json =
-                "{\"confidence\":0.9,\"groups\":[{" +
-                "\"group\":\"object\",\"subgroup\":\"main\",\"entries\":[" +
-                "{\"id\":\"T0001\",\"x\":0,\"y\":0}," +
-                "{\"id\":\"T0002\",\"x\":1,\"y\":0}" +
-                "]}]}";
+                "{\"confidence\":0.9,\"placements\":[" +
+                "{\"id\":\"T0001\",\"group\":\"object\",\"subgroup\":\"main\",\"x\":0,\"y\":0}," +
+                "{\"id\":\"T0002\",\"group\":\"object\",\"subgroup\":\"main\",\"x\":1,\"y\":0}" +
+                "]}";
 
             AnalyzedLayout layout =
                 TilePaletteVisionAnalyzer.ParseLayoutText(json, sources);
@@ -394,9 +397,8 @@ namespace TilePaletteLayoutStudio.Tests
                     }));
 
             string json =
-                "{\"confidence\":1,\"groups\":[{" +
-                "\"group\":\"group\",\"subgroup\":\"main\",\"entries\":[" +
-                "{\"id\":\"T0001\",\"x\":0,\"y\":0}]}]}";
+                "{\"confidence\":1,\"placements\":[" +
+                "{\"id\":\"T0001\",\"group\":\"group\",\"subgroup\":\"main\",\"x\":0,\"y\":0}]}";
 
             InvalidOperationException exception =
                 Assert.Throws<InvalidOperationException>(() =>
