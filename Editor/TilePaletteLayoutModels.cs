@@ -10,7 +10,6 @@ namespace TilePaletteLayoutStudio
     internal static class StudioConstants
     {
         public const string ReportFolder = "Library/TilePaletteLayoutStudio/Reports";
-        public const string LocalEnvironmentPath = "Library/TilePaletteLayoutStudio/.env.local";
     }
 
     public enum LayoutInferenceSource
@@ -181,12 +180,6 @@ namespace TilePaletteLayoutStudio
     {
         public SourceScanResult sources;
         public IReadOnlyList<TileLayoutTemplate> customTemplates;
-    }
-
-    internal interface ILayoutInferenceProvider
-    {
-        string DisplayName { get; }
-        void Analyze(InferenceRequest request, Action<AnalyzedLayout, string> completed);
     }
 
     internal interface ITileAssetFactory
