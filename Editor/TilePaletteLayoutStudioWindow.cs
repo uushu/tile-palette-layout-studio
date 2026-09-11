@@ -11,6 +11,10 @@ namespace TilePaletteLayoutStudio
         private AnalyzedLayout analyzedLayout;
         private Vector2 scroll;
         private bool busy;
+        private TilePaletteVisionAnalyzer activeAnalyzer;
+        private int analysisBatch;
+        private int analysisBatchCount;
+        private string analysisStatus = string.Empty;
 
         [MenuItem("Tools/Tile Palette/Layout Studio", priority = 100)]
         private static void Open()
@@ -24,17 +28,26 @@ namespace TilePaletteLayoutStudio
             minSize = new Vector2(760f, 540f);
         }
 
+        private void OnDisable()
+        {
+            activeAnalyzer?.Cancel();
+        }
+
         private void OnGUI()
         {
             scroll = EditorGUILayout.BeginScrollView(scroll);
+
             EditorGUI.BeginDisabledGroup(busy);
             DrawProfile();
             if (profile != null)
-            {
                 DrawActions();
-                DrawPreview();
-            }
             EditorGUI.EndDisabledGroup();
+
+            if (busy)
+                DrawAnalysisProgress();
+            if (profile != null)
+                DrawPreview();
+
             EditorGUILayout.EndScrollView();
         }
 
@@ -102,22 +115,60 @@ namespace TilePaletteLayoutStudio
         private void DrawActions()
         {
             EditorGUILayout.Space(10f);
-            EditorGUILayout.LabelField(new GUIContent("Main Actions", "Analyze, build, or validate this Palette."), EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                new GUIContent("Main Actions", "Analyze, build, or validate this Palette."),
+                EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("Analyze Layout", "Uses the configured vision provider to create one final layout."), GUILayout.Height(28f)))
+            if (GUILayout.Button(
+                    new GUIContent("Analyze Layout", "Uses the configured vision provider to create one final layout."),
+                    GUILayout.Height(28f)))
                 AnalyzeLayout();
-            if (GUILayout.Button(new GUIContent("Build / Update Palette", "Applies the analyzed layout, or repairs the saved Profile layout."), GUILayout.Height(28f)))
+            if (GUILayout.Button(
+                    new GUIContent("Build / Update Palette", "Applies the analyzed layout, or repairs the saved Profile layout."),
+                    GUILayout.Height(28f)))
                 ApplyBuild();
-            if (GUILayout.Button(new GUIContent("Validate", "Checks the Profile, Tile assets, and Palette cells."), GUILayout.Height(28f)))
+            if (GUILayout.Button(
+                    new GUIContent("Validate", "Checks the Profile, Tile assets, and Palette cells."),
+                    GUILayout.Height(28f)))
                 ValidateLayout();
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawAnalysisProgress()
+        {
+            EditorGUILayout.Space(10f);
+            EditorGUILayout.LabelField("Vision Analysis", EditorStyles.boldLabel);
+            Rect progressRect = GUILayoutUtility.GetRect(18f, 18f, "TextField");
+            float progress = analysisBatchCount <= 0
+                ? 0f
+                : Mathf.Clamp01(analysisBatch / (float)analysisBatchCount);
+            EditorGUI.ProgressBar(
+                progressRect,
+                progress,
+                analysisBatchCount <= 0
+                    ? "Preparing analysis..."
+                    : $"Batch {analysisBatch}/{analysisBatchCount}");
+            if (!string.IsNullOrWhiteSpace(analysisStatus))
+                EditorGUILayout.LabelField(analysisStatus, EditorStyles.miniLabel);
+
+            EditorGUI.BeginDisabledGroup(activeAnalyzer == null);
+            if (GUILayout.Button(
+                    new GUIContent("Cancel Analysis", "Stops the current request and keeps the last successful preview."),
+                    GUILayout.Height(24f)))
+            {
+                analysisStatus = "Cancelling analysis...";
+                activeAnalyzer?.Cancel();
+            }
+            EditorGUI.EndDisabledGroup();
         }
 
         private void DrawPreview()
         {
             if (analyzedLayout == null || analyzedLayout.placements.Count == 0) return;
             EditorGUILayout.Space(10f);
-            EditorGUILayout.LabelField(new GUIContent("Layout Preview", "The single layout produced by visual analysis."), EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                new GUIContent("Layout Preview", "The single layout produced by visual analysis."),
+                EditorStyles.boldLabel);
             EditorGUILayout.LabelField("Confidence", analyzedLayout.confidence.ToString("P0"));
 
             foreach (IGrouping<string, AnalyzedLayoutPlacement> group in analyzedLayout.placements
@@ -125,17 +176,32 @@ namespace TilePaletteLayoutStudio
                          .OrderBy(value => value.Key, StringComparer.Ordinal))
             {
                 EditorGUILayout.LabelField(group.Key, EditorStyles.miniBoldLabel);
-                BoundsInt bounds = TilePaletteProfileUtility.CalculateBounds(group.Select(value => value.localPosition));
-                float cell = Mathf.Clamp(420f / Mathf.Max(1, bounds.size.x), 24f, 42f);
-                Rect area = GUILayoutUtility.GetRect(bounds.size.x * cell, bounds.size.y * cell);
+                BoundsInt bounds = TilePaletteProfileUtility.CalculateBounds(
+                    group.Select(value => value.localPosition));
+                float cell = Mathf.Clamp(
+                    420f / Mathf.Max(1, bounds.size.x),
+                    24f,
+                    42f);
+                Rect area = GUILayoutUtility.GetRect(
+                    bounds.size.x * cell,
+                    bounds.size.y * cell);
                 foreach (AnalyzedLayoutPlacement placement in group)
                 {
                     int x = placement.localPosition.x - bounds.xMin;
                     int y = bounds.yMax - 1 - placement.localPosition.y;
-                    Rect tileRect = new Rect(area.x + x * cell, area.y + y * cell, cell - 2f, cell - 2f);
-                    Texture preview = AssetPreview.GetAssetPreview(placement.sprite) ?? AssetPreview.GetMiniThumbnail(placement.sprite);
-                    if (preview != null) GUI.DrawTexture(tileRect, preview, ScaleMode.ScaleToFit, true);
-                    GUI.Box(tileRect, new GUIContent(string.Empty, placement.sourceId));
+                    Rect tileRect = new Rect(
+                        area.x + x * cell,
+                        area.y + y * cell,
+                        cell - 2f,
+                        cell - 2f);
+                    Texture preview =
+                        AssetPreview.GetAssetPreview(placement.sprite) ??
+                        AssetPreview.GetMiniThumbnail(placement.sprite);
+                    if (preview != null)
+                        GUI.DrawTexture(tileRect, preview, ScaleMode.ScaleToFit, true);
+                    GUI.Box(
+                        tileRect,
+                        new GUIContent(string.Empty, placement.sourceId));
                 }
             }
         }
@@ -162,21 +228,48 @@ namespace TilePaletteLayoutStudio
                 SourceScanResult sourceScan =
                     TilePaletteSourceScanner.Scan(profile.SourceFolderPath, true);
                 if (!sourceScan.IsValid)
-                    throw new InvalidOperationException(string.Join("\n", sourceScan.errors));
+                    throw new InvalidOperationException(
+                        string.Join("\n", sourceScan.errors));
+
                 busy = true;
-                analyzedLayout = null;
-                new TilePaletteVisionAnalyzer().Analyze(
+                analysisBatch = 0;
+                analysisBatchCount = 0;
+                analysisStatus = "Preparing analysis...";
+                activeAnalyzer = new TilePaletteVisionAnalyzer();
+                TilePaletteVisionAnalyzer analyzer = activeAnalyzer;
+                analyzer.Analyze(
                     new InferenceRequest
                     {
                         sources = sourceScan,
                         customTemplates = profile.CustomTemplates
                     },
+                    (currentBatch, batchCount, status) =>
+                    {
+                        if (activeAnalyzer != analyzer) return;
+                        analysisBatch = currentBatch;
+                        analysisBatchCount = batchCount;
+                        analysisStatus = status;
+                        Repaint();
+                    },
                     (layout, error) =>
                     {
+                        if (activeAnalyzer != analyzer) return;
                         busy = false;
+                        activeAnalyzer = null;
+                        analysisStatus = string.Empty;
+
                         if (!string.IsNullOrWhiteSpace(error) || layout == null)
                         {
-                            Debug.LogError("[TilePalette] 分析失败：" + (string.IsNullOrWhiteSpace(error) ? "视觉模型未返回布局。" : error));
+                            string failure = string.IsNullOrWhiteSpace(error)
+                                ? "视觉模型未返回布局。"
+                                : error;
+                            if (string.Equals(
+                                    failure,
+                                    "Analysis cancelled.",
+                                    StringComparison.Ordinal))
+                                Debug.LogWarning("[TilePalette] 分析已取消，已保留上一次成功预览。");
+                            else
+                                Debug.LogError("[TilePalette] 分析失败：" + failure);
                             Repaint();
                             return;
                         }
@@ -191,6 +284,8 @@ namespace TilePaletteLayoutStudio
             catch (Exception exception)
             {
                 busy = false;
+                activeAnalyzer = null;
+                analysisStatus = string.Empty;
                 Debug.LogError("[TilePalette] 分析失败：" + exception.Message);
                 Repaint();
             }
@@ -207,8 +302,10 @@ namespace TilePaletteLayoutStudio
                     .Select(item => item.diagnostic)
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Distinct(StringComparer.Ordinal));
-                if (string.IsNullOrWhiteSpace(details)) Debug.Log("[TilePalette] 验证通过");
-                else Debug.LogWarning("[TilePalette] 验证发现问题：\n" + details);
+                if (string.IsNullOrWhiteSpace(details))
+                    Debug.Log("[TilePalette] 验证通过");
+                else
+                    Debug.LogWarning("[TilePalette] 验证发现问题：\n" + details);
             });
         }
 
@@ -221,27 +318,38 @@ namespace TilePaletteLayoutStudio
                 {
                     if (analyzedLayout != null)
                     {
-                        SourceScanResult currentScan = TilePaletteSourceScanner.Scan(profile.SourceFolderPath, true);
+                        SourceScanResult currentScan =
+                            TilePaletteSourceScanner.Scan(
+                                profile.SourceFolderPath,
+                                true);
                         if (!currentScan.IsValid)
-                            throw new InvalidOperationException(string.Join("\n", currentScan.errors));
+                            throw new InvalidOperationException(
+                                string.Join("\n", currentScan.errors));
                         Undo.RecordObject(profile, "Apply Visual Tile Layout");
                         TilePaletteProfileUtility.ApplyAnalyzedLayout(
                             profile,
                             analyzedLayout,
                             currentScan.sprites.Select(value => value.resourceId),
                             true);
-                        using (TilePaletteAutoSyncGuard.Suppress()) AssetDatabase.SaveAssets();
+                        using (TilePaletteAutoSyncGuard.Suppress())
+                            AssetDatabase.SaveAssets();
                     }
-                    else if (!profile.Groups.SelectMany(group => group.entries).Any(entry => entry.included))
+                    else if (!profile.Groups
+                                 .SelectMany(group => group.entries)
+                                 .Any(entry => entry.included))
                     {
-                        throw new InvalidOperationException("Profile 还没有布局。请先点击 Analyze Layout。");
+                        throw new InvalidOperationException(
+                            "Profile 还没有布局。请先点击 Analyze Layout。");
                     }
 
                     LayoutPlan preview = TilePaletteBuilder.CreatePlan(profile);
                     if (preview.HasBlockingConflicts)
-                        throw new InvalidOperationException(string.Join("\n", preview.BlockingConflicts
-                            .Select(item => item.diagnostic).Distinct(StringComparer.Ordinal)));
-                    if (preview.HasConfirmedMoves && !EditorUtility.DisplayDialog(
+                        throw new InvalidOperationException(
+                            string.Join("\n", preview.BlockingConflicts
+                                .Select(item => item.diagnostic)
+                                .Distinct(StringComparer.Ordinal)));
+                    if (preview.HasConfirmedMoves &&
+                        !EditorUtility.DisplayDialog(
                             "Confirm Layout Changes",
                             "The saved Profile requires Tile swaps or cyclic moves. Continue?",
                             "Build",
@@ -266,7 +374,8 @@ namespace TilePaletteLayoutStudio
         {
             EditorJsonUtility.FromJsonOverwrite(json, profile);
             EditorUtility.SetDirty(profile);
-            using (TilePaletteAutoSyncGuard.Suppress()) AssetDatabase.SaveAssets();
+            using (TilePaletteAutoSyncGuard.Suppress())
+                AssetDatabase.SaveAssets();
         }
 
         private void RunAction(string operation, Action action)
