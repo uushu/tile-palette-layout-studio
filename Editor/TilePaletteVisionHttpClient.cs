@@ -1,319 +1,157 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net;
 using System.Text;
 using UnityEditor;
 using UnityEngine.Networking;
 
 namespace TilePaletteLayoutStudio
 {
+    internal enum HttpRequestStatus
+    {
+        Success,
+        Cancelled,
+        Failed
+    }
+
+    internal sealed class HttpRequestResult
+    {
+        public HttpRequestStatus Status;
+        public long StatusCode;
+        public string Body = string.Empty;
+        public string Error = string.Empty;
+        public long ElapsedMilliseconds;
+    }
+
     internal static class TilePaletteVisionHttpClient
     {
-        private const int MaximumAttempts = 2;
-        private const string ProviderOverloadCode = "\"code\":\"1305\"";
-
-        public static void Send(
-            VisionProviderRequest request,
-            Action<string, string, long> completed,
-            Func<bool> cancellationRequested = null)
+        internal static void Send(
+            string url,
+            string method,
+            string json,
+            int timeoutSeconds,
+            Func<bool> cancellationRequested,
+            Action<HttpRequestResult> completed)
         {
-            if (request == null)
+            if (string.IsNullOrWhiteSpace(url))
             {
-                completed(string.Empty, "Vision request is empty.", 0);
+                completed(new HttpRequestResult
+                {
+                    Status = HttpRequestStatus.Failed,
+                    Error = "Request URL is empty."
+                });
                 return;
             }
 
-            SendAttempt(
-                request,
-                completed,
-                cancellationRequested,
-                1,
-                0);
-        }
-
-        private static void SendAttempt(
-            VisionProviderRequest request,
-            Action<string, string, long> completed,
-            Func<bool> cancellationRequested,
-            int attempt,
-            long previousElapsedMilliseconds)
-        {
             if (cancellationRequested?.Invoke() == true)
             {
-                completed(
-                    string.Empty,
-                    "Analysis cancelled.",
-                    previousElapsedMilliseconds);
+                completed(new HttpRequestResult
+                {
+                    Status = HttpRequestStatus.Cancelled,
+                    Error = "Analysis cancelled."
+                });
                 return;
             }
 
-            string proxyAddress = ApplySystemProxy(request.Url);
-            UnityWebRequest webRequest = new UnityWebRequest(
-                request.Url,
-                UnityWebRequest.kHttpVerbPOST)
+            UnityWebRequest request = new UnityWebRequest(
+                url,
+                string.IsNullOrWhiteSpace(method)
+                    ? UnityWebRequest.kHttpVerbGET
+                    : method)
             {
-                uploadHandler = new UploadHandlerRaw(
-                    Encoding.UTF8.GetBytes(request.Json)),
                 downloadHandler = new DownloadHandlerBuffer(),
-                timeout = request.TimeoutSeconds
+                timeout = Math.Max(1, timeoutSeconds)
             };
-            webRequest.SetRequestHeader("Content-Type", "application/json");
-            if (request.Headers != null)
+
+            if (!string.IsNullOrEmpty(json))
             {
-                foreach (KeyValuePair<string, string> header in request.Headers)
-                    webRequest.SetRequestHeader(header.Key, header.Value);
+                request.uploadHandler = new UploadHandlerRaw(
+                    Encoding.UTF8.GetBytes(json));
+                request.SetRequestHeader("Content-Type", "application/json");
             }
 
             Stopwatch stopwatch = Stopwatch.StartNew();
-            UnityWebRequestAsyncOperation operation = webRequest.SendWebRequest();
+            UnityWebRequestAsyncOperation operation = request.SendWebRequest();
+
+            void Finish(HttpRequestResult result)
+            {
+                EditorApplication.update -= Poll;
+                stopwatch.Stop();
+                result.ElapsedMilliseconds = stopwatch.ElapsedMilliseconds;
+                request.Dispose();
+                completed(result);
+            }
+
             void Poll()
             {
                 if (!operation.isDone)
                 {
                     if (cancellationRequested?.Invoke() != true) return;
 
-                    EditorApplication.update -= Poll;
-                    stopwatch.Stop();
-                    webRequest.Abort();
-                    long cancelledElapsed =
-                        previousElapsedMilliseconds +
-                        stopwatch.ElapsedMilliseconds;
-                    webRequest.Dispose();
-                    completed(
-                        string.Empty,
-                        "Analysis cancelled.",
-                        cancelledElapsed);
+                    request.Abort();
+                    Finish(new HttpRequestResult
+                    {
+                        Status = HttpRequestStatus.Cancelled,
+                        Error = "Analysis cancelled."
+                    });
                     return;
                 }
 
-                EditorApplication.update -= Poll;
-                stopwatch.Stop();
-                long elapsed =
-                    previousElapsedMilliseconds +
-                    stopwatch.ElapsedMilliseconds;
-                try
+                if (cancellationRequested?.Invoke() == true)
                 {
-                    if (cancellationRequested?.Invoke() == true)
+                    Finish(new HttpRequestResult
                     {
-                        completed(
-                            string.Empty,
-                            "Analysis cancelled.",
-                            elapsed);
-                        return;
-                    }
-
-                    if (webRequest.result == UnityWebRequest.Result.Success)
-                    {
-                        completed(
-                            webRequest.downloadHandler.text,
-                            string.Empty,
-                            elapsed);
-                        return;
-                    }
-
-                    string response = webRequest.downloadHandler?.text;
-                    if (attempt < MaximumAttempts &&
-                        IsRetryableResponse(webRequest.responseCode, response))
-                    {
-                        int delaySeconds =
-                            ResolveRetryDelaySeconds(webRequest, attempt);
-                        ScheduleRetry(
-                            () => SendAttempt(
-                                request,
-                                completed,
-                                cancellationRequested,
-                                attempt + 1,
-                                elapsed),
-                            delaySeconds,
-                            cancellationRequested);
-                        return;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(response) &&
-                        response.Length > 500)
-                        response = response.Substring(0, 500);
-                    string failure = FormatFailure(
-                        request.Url,
-                        webRequest.responseCode,
-                        webRequest.error,
-                        response,
-                        proxyAddress);
-                    if (attempt > 1)
-                        failure += $" (attempts: {attempt})";
-                    completed(string.Empty, failure, elapsed);
+                        Status = HttpRequestStatus.Cancelled,
+                        Error = "Analysis cancelled."
+                    });
+                    return;
                 }
-                catch (Exception exception)
+
+                if (request.result == UnityWebRequest.Result.Success)
                 {
-                    completed(
-                        string.Empty,
-                        "Vision request failed: " + exception.Message,
-                        elapsed);
+                    Finish(new HttpRequestResult
+                    {
+                        Status = HttpRequestStatus.Success,
+                        StatusCode = request.responseCode,
+                        Body = request.downloadHandler?.text ?? string.Empty
+                    });
+                    return;
                 }
-                finally
+
+                string body = request.downloadHandler?.text ?? string.Empty;
+                Finish(new HttpRequestResult
                 {
-                    webRequest.Dispose();
-                }
+                    Status = HttpRequestStatus.Failed,
+                    StatusCode = request.responseCode,
+                    Body = body,
+                    Error = FormatFailure(
+                        request.responseCode,
+                        request.error,
+                        body)
+                });
             }
 
             EditorApplication.update += Poll;
         }
 
-        internal static bool IsRetryableResponse(
-            long responseCode,
-            string response)
-        {
-            if (responseCode == 429 && IsProviderOverloaded(response))
-                return false;
-
-            return responseCode == 0 ||
-                   responseCode == 408 ||
-                   responseCode == 429 ||
-                   responseCode == 500 ||
-                   responseCode == 502 ||
-                   responseCode == 503 ||
-                   responseCode == 504;
-        }
-
-        internal static bool IsProviderOverloaded(string response) =>
-            !string.IsNullOrWhiteSpace(response) &&
-            response.IndexOf(
-                ProviderOverloadCode,
-                StringComparison.Ordinal) >= 0;
-
-        private static int ResolveRetryDelaySeconds(
-            UnityWebRequest request,
-            int attempt)
-        {
-            if (request.responseCode == 429)
-            {
-                string retryAfter = request.GetResponseHeader("Retry-After");
-                if (int.TryParse(retryAfter, out int seconds))
-                    return Math.Max(1, Math.Min(seconds, 30));
-            }
-
-            return Math.Max(1, attempt * 2);
-        }
-
-        private static void ScheduleRetry(
-            Action action,
-            int delaySeconds,
-            Func<bool> cancellationRequested)
-        {
-            double readyAt =
-                EditorApplication.timeSinceStartup + delaySeconds;
-            void Wait()
-            {
-                if (cancellationRequested?.Invoke() == true)
-                {
-                    EditorApplication.update -= Wait;
-                    action();
-                    return;
-                }
-
-                if (EditorApplication.timeSinceStartup < readyAt) return;
-                EditorApplication.update -= Wait;
-                action();
-            }
-            EditorApplication.update += Wait;
-        }
-
-        private static string ApplySystemProxy(string requestUrl)
-        {
-            if (!Uri.TryCreate(
-                    requestUrl,
-                    UriKind.Absolute,
-                    out Uri requestUri))
-                return string.Empty;
-
-            string environmentName =
-                requestUri.Scheme == Uri.UriSchemeHttps
-                    ? "HTTPS_PROXY"
-                    : "HTTP_PROXY";
-            string existingProxy =
-                Environment.GetEnvironmentVariable(environmentName);
-            if (!string.IsNullOrWhiteSpace(existingProxy))
-                return SanitizeProxyAddress(existingProxy);
-
-            try
-            {
-                IWebProxy systemProxy =
-                    WebRequest.GetSystemWebProxy();
-                Uri proxyUri = systemProxy?.GetProxy(requestUri);
-                if (proxyUri == null ||
-                    systemProxy.IsBypassed(requestUri) ||
-                    proxyUri == requestUri)
-                    return string.Empty;
-
-                string proxyAddress =
-                    proxyUri.AbsoluteUri.TrimEnd('/');
-                Environment.SetEnvironmentVariable(
-                    "HTTP_PROXY",
-                    proxyAddress,
-                    EnvironmentVariableTarget.Process);
-                Environment.SetEnvironmentVariable(
-                    "HTTPS_PROXY",
-                    proxyAddress,
-                    EnvironmentVariableTarget.Process);
-                Environment.SetEnvironmentVariable(
-                    "http_proxy",
-                    proxyAddress,
-                    EnvironmentVariableTarget.Process);
-                Environment.SetEnvironmentVariable(
-                    "https_proxy",
-                    proxyAddress,
-                    EnvironmentVariableTarget.Process);
-                return SanitizeProxyAddress(proxyAddress);
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
         private static string FormatFailure(
-            string requestUrl,
-            long responseCode,
+            long statusCode,
             string requestError,
-            string response,
-            string proxyAddress)
+            string body)
         {
-            if (responseCode == 429 && IsProviderOverloaded(response))
+            string trimmed = body?.Trim() ?? string.Empty;
+            if (trimmed.Length > 1000)
+                trimmed = trimmed.Substring(0, 1000);
+
+            if (statusCode > 0)
             {
-                return "视觉模型当前访问量过大（HTTP 429 / code 1305）。" +
-                       "这是服务端模型容量限制，不是本地网络或 API Key 错误；" +
-                       "本次请求不会继续自动重试，请稍后再试。";
+                return string.IsNullOrWhiteSpace(trimmed)
+                    ? $"HTTP {statusCode}: {requestError}"
+                    : $"HTTP {statusCode}: {trimmed}";
             }
 
-            if (responseCode != 0)
-                return $"HTTP {responseCode} {requestError}: {response}";
-
-            string host =
-                Uri.TryCreate(
-                    requestUrl,
-                    UriKind.Absolute,
-                    out Uri requestUri)
-                    ? requestUri.Host
-                    : requestUrl;
-            string proxyMessage =
-                string.IsNullOrWhiteSpace(proxyAddress)
-                    ? "No system proxy was detected."
-                    : $"System proxy {proxyAddress} was detected; " +
-                      "verify that its current route can access this host.";
-            return $"Cannot connect to {host} ({requestError}). " +
-                   proxyMessage;
-        }
-
-        private static string SanitizeProxyAddress(string proxyAddress)
-        {
-            if (!Uri.TryCreate(
-                    proxyAddress,
-                    UriKind.Absolute,
-                    out Uri proxyUri))
-                return "configured";
-            return proxyUri.IsDefaultPort
-                ? $"{proxyUri.Scheme}://{proxyUri.Host}"
-                : $"{proxyUri.Scheme}://{proxyUri.Host}:{proxyUri.Port}";
+            return string.IsNullOrWhiteSpace(requestError)
+                ? "Cannot connect to the local Ollama service."
+                : "Cannot connect to the local Ollama service: " + requestError;
         }
     }
 }
