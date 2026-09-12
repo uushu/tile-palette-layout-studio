@@ -116,6 +116,13 @@ namespace TilePaletteLayoutStudio
     {
         internal static Action AfterPrefabSavedForValidation;
 
+        internal static string FormatUnknownTileWarning(int count, IEnumerable<string> examples)
+        {
+            return "Palette contains " + count +
+                   " Profile-external Tiles; preserved. Examples: " +
+                   string.Join(", ", examples.Take(3));
+        }
+
         public static LayoutPlan CreatePlan(TilePaletteProfile profile)
         {
             ValidateProfile(profile);
@@ -309,11 +316,16 @@ namespace TilePaletteLayoutStudio
 
             foreach (TileBase tile in resolved.Values.Where(tile => tile != null))
                 knownTiles.Add(tile);
+            List<string> unknownTileExamples = new List<string>();
             foreach (KeyValuePair<Vector3Int, TileBase> cell in palette.Cells)
             {
                 if (!knownTiles.Contains(cell.Value))
-                    result.warnings.Add("Unknown Tile was ignored at " + cell.Key + ": " + cell.Value.name);
+                    unknownTileExamples.Add(cell.Value.name + " at " + cell.Key);
             }
+            if (unknownTileExamples.Count > 0)
+                result.warnings.Add(FormatUnknownTileWarning(
+                    unknownTileExamples.Count,
+                    unknownTileExamples));
 
             try
             {

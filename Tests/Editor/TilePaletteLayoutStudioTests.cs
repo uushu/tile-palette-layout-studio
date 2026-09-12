@@ -62,5 +62,18 @@ namespace TilePaletteLayoutStudio.Tests
                 UnityEngine.Object.DestroyImmediate(profile);
             }
         }
+
+        [Test]
+        public void UnknownTileWarning_IsOneLineWithAtMostThreeExamples()
+        {
+            string warning = TilePaletteBuilder.FormatUnknownTileWarning(
+                4,
+                new[] { "a at (0, 0, 0)", "b at (1, 0, 0)", "c at (2, 0, 0)", "d at (3, 0, 0)" });
+
+            Assert.That(warning, Does.Contain("4 Profile-external Tiles"));
+            Assert.That(warning, Does.Contain("a at (0, 0, 0)"));
+            Assert.That(warning, Does.Contain("c at (2, 0, 0)"));
+            Assert.That(warning, Does.Not.Contain("d at (3, 0, 0)"));
+        }
     }
 }
