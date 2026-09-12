@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -7,10 +8,9 @@ namespace TilePaletteLayoutStudio
 {
     internal sealed class TilePaletteLayoutStudioWindow : EditorWindow
     {
+        private const float PreviewCellSize = 32f;
         private TilePaletteProfile profile;
-        private AnalyzedLayout analyzedLayout;
         private Vector2 scroll;
-        private bool busy;
 
         [MenuItem("Tools/Tile Palette/Layout Studio", priority = 100)]
         private static void Open()
@@ -18,23 +18,27 @@ namespace TilePaletteLayoutStudio
             GetWindow<TilePaletteLayoutStudioWindow>("Tile Palette Layout Studio");
         }
 
+        internal static void RepaintOpenWindows()
+        {
+            foreach (TilePaletteLayoutStudioWindow window in Resources.FindObjectsOfTypeAll<TilePaletteLayoutStudioWindow>())
+                window.Repaint();
+        }
+
         private void OnEnable()
         {
             profile = TilePaletteProfileStore.LoadPreferred();
-            minSize = new Vector2(760f, 540f);
+            minSize = new Vector2(720f, 500f);
         }
 
         private void OnGUI()
         {
             scroll = EditorGUILayout.BeginScrollView(scroll);
-            EditorGUI.BeginDisabledGroup(busy);
             DrawProfile();
             if (profile != null)
             {
                 DrawActions();
                 DrawPreview();
             }
-            EditorGUI.EndDisabledGroup();
             EditorGUILayout.EndScrollView();
         }
 
@@ -45,7 +49,7 @@ namespace TilePaletteLayoutStudio
                 new GUIContent("Profile & Paths", "References used by this layout profile."),
                 EditorStyles.boldLabel);
             TilePaletteProfile selected = (TilePaletteProfile)EditorGUILayout.ObjectField(
-                new GUIContent("Profile", "The authoritative layout data for one Palette."),
+                new GUIContent("Profile", "The authoritative layout for one Tile Palette."),
                 profile,
                 typeof(TilePaletteProfile),
                 false);
@@ -53,13 +57,12 @@ namespace TilePaletteLayoutStudio
             {
                 profile = selected;
                 TilePaletteProfileStore.SetPreferred(profile);
-                ResetAnalysis();
             }
 
             if (profile == null)
             {
-                if (GUILayout.Button(new GUIContent("Create Profile", "Creates a new profile in Assets.")))
-                    RunAction("Profile 创建", () =>
+                if (GUILayout.Button(new GUIContent("Create Profile", "Create a layout Profile in Assets.")))
+                    Run("Profile 创建", () =>
                     {
                         profile = TilePaletteProfileStore.CreateProfile();
                         Debug.Log("[TilePalette] Profile 创建完成");
@@ -68,208 +71,122 @@ namespace TilePaletteLayoutStudio
             }
 
             EditorGUI.BeginChangeCheck();
-            DefaultAsset source = (DefaultAsset)EditorGUILayout.ObjectField(
-                new GUIContent("Source Folder", "Sprite assets under this folder are analyzed."),
+            DefaultAsset sourceFolder = (DefaultAsset)EditorGUILayout.ObjectField(
+                new GUIContent("Source Folder", "Used when a Recipe refers to Sprites by name."),
                 profile.SourceFolder,
                 typeof(DefaultAsset),
                 false);
-            DefaultAsset output = (DefaultAsset)EditorGUILayout.ObjectField(
+            DefaultAsset tileOutputFolder = (DefaultAsset)EditorGUILayout.ObjectField(
                 new GUIContent("Tile Output Folder", "Missing Tile assets are created here."),
                 profile.TileOutputFolder,
                 typeof(DefaultAsset),
                 false);
-            GameObject palette = (GameObject)EditorGUILayout.ObjectField(
-                new GUIContent("Palette Prefab", "The Palette prefab managed by this profile."),
+            GameObject palettePrefab = (GameObject)EditorGUILayout.ObjectField(
+                new GUIContent("Palette Prefab", "The Tile Palette Prefab built and validated by this Profile."),
                 profile.PalettePrefab,
                 typeof(GameObject),
                 false);
             if (EditorGUI.EndChangeCheck())
             {
                 Undo.RecordObject(profile, "Change Tile Palette Profile Paths");
-                profile.SourceFolder = source;
-                profile.TileOutputFolder = output;
-                profile.PalettePrefab = palette;
+                profile.SourceFolder = sourceFolder;
+                profile.TileOutputFolder = tileOutputFolder;
+                profile.PalettePrefab = palettePrefab;
                 EditorUtility.SetDirty(profile);
                 TilePaletteProfileStore.SetPreferred(profile);
-                ResetAnalysis();
+                TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
             }
-
-            EditorGUILayout.LabelField(
-                new GUIContent("Last Build Hash", "Fingerprint of the last successful build."),
-                new GUIContent(string.IsNullOrEmpty(profile.LastBuildHash) ? "Not built by Studio" : profile.LastBuildHash));
         }
 
         private void DrawActions()
         {
             EditorGUILayout.Space(10f);
-            EditorGUILayout.LabelField(new GUIContent("Main Actions", "Analyze, build, or validate this Palette."), EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                new GUIContent("Main Actions", "Build or validate the saved Profile layout."),
+                EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(new GUIContent("Analyze Layout", "Uses the configured vision provider to create one final layout."), GUILayout.Height(28f)))
-                AnalyzeLayout();
-            if (GUILayout.Button(new GUIContent("Build / Update Palette", "Applies the analyzed layout, or repairs the saved Profile layout."), GUILayout.Height(28f)))
-                ApplyBuild();
-            if (GUILayout.Button(new GUIContent("Validate", "Checks the Profile, Tile assets, and Palette cells."), GUILayout.Height(28f)))
-                ValidateLayout();
+            if (GUILayout.Button(
+                    new GUIContent("Build Palette", "Validate, apply the Profile, then validate again."),
+                    GUILayout.Height(28f)))
+                BuildPalette();
+            if (GUILayout.Button(
+                    new GUIContent("Validate", "Read-only check of Profile, Tile assets, and Palette cells."),
+                    GUILayout.Height(28f)))
+                ValidatePalette();
             EditorGUILayout.EndHorizontal();
         }
 
         private void DrawPreview()
         {
-            if (analyzedLayout == null || analyzedLayout.placements.Count == 0) return;
+            List<PreviewEntry> entries = profile.Groups
+                .SelectMany(group => group.entries.Where(entry => entry.included && entry.sprite != null)
+                    .Select(entry => new PreviewEntry
+                    {
+                        Group = group,
+                        Entry = entry,
+                        Position = TilePaletteProfileUtility.GetTargetPosition(group, entry)
+                    }))
+                .ToList();
+            if (entries.Count == 0) return;
+
             EditorGUILayout.Space(10f);
-            EditorGUILayout.LabelField(new GUIContent("Layout Preview", "The single layout produced by visual analysis."), EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("Confidence", analyzedLayout.confidence.ToString("P0"));
+            EditorGUILayout.LabelField(
+                new GUIContent("Layout Preview", "The final layout currently stored in the Profile."),
+                EditorStyles.boldLabel);
+            BoundsInt bounds = TilePaletteProfileUtility.CalculateBounds(entries.Select(entry => entry.Position));
+            float width = Mathf.Max(position.width - 26f, bounds.size.x * PreviewCellSize);
+            float height = bounds.size.y * PreviewCellSize;
+            Rect area = GUILayoutUtility.GetRect(width, height);
 
-            foreach (IGrouping<string, AnalyzedLayoutPlacement> group in analyzedLayout.placements
-                         .GroupBy(value => value.groupName + "/" + value.subgroupName, StringComparer.Ordinal)
-                         .OrderBy(value => value.Key, StringComparer.Ordinal))
+            foreach (PreviewEntry previewEntry in entries)
             {
-                EditorGUILayout.LabelField(group.Key, EditorStyles.miniBoldLabel);
-                BoundsInt bounds = TilePaletteProfileUtility.CalculateBounds(group.Select(value => value.localPosition));
-                float cell = Mathf.Clamp(420f / Mathf.Max(1, bounds.size.x), 24f, 42f);
-                Rect area = GUILayoutUtility.GetRect(bounds.size.x * cell, bounds.size.y * cell);
-                foreach (AnalyzedLayoutPlacement placement in group)
-                {
-                    int x = placement.localPosition.x - bounds.xMin;
-                    int y = bounds.yMax - 1 - placement.localPosition.y;
-                    Rect tileRect = new Rect(area.x + x * cell, area.y + y * cell, cell - 2f, cell - 2f);
-                    Texture preview = AssetPreview.GetAssetPreview(placement.sprite) ?? AssetPreview.GetMiniThumbnail(placement.sprite);
-                    if (preview != null) GUI.DrawTexture(tileRect, preview, ScaleMode.ScaleToFit, true);
-                    GUI.Box(tileRect, new GUIContent(string.Empty, placement.sourceId));
-                }
+                int x = previewEntry.Position.x - bounds.xMin;
+                int y = bounds.yMax - 1 - previewEntry.Position.y;
+                Rect tileRect = new Rect(
+                    area.x + x * PreviewCellSize,
+                    area.y + y * PreviewCellSize,
+                    PreviewCellSize - 2f,
+                    PreviewCellSize - 2f);
+                Texture preview = AssetPreview.GetAssetPreview(previewEntry.Entry.sprite) ??
+                                  AssetPreview.GetMiniThumbnail(previewEntry.Entry.sprite);
+                if (preview != null) GUI.DrawTexture(tileRect, preview, ScaleMode.ScaleToFit, true);
+                GUI.Box(
+                    tileRect,
+                    new GUIContent(
+                        string.Empty,
+                        previewEntry.Group.Id + "/" + previewEntry.Entry.sourceId + " " + previewEntry.Position));
             }
         }
 
-        private void AnalyzeLayout()
+        private void BuildPalette()
         {
-            if (busy) return;
-            try
+            Run("构建", () =>
             {
-                if (!TilePaletteVisionSettings.TryResolve(
-                        out _,
-                        out _,
-                        out string configurationError))
-                {
-                    if (TilePaletteVisionSettings.TryGetProviderMissingApiKey(
-                            out ITilePaletteVisionProvider provider))
-                    {
-                        TilePaletteApiKeyWindow.Open(provider, AnalyzeLayout);
-                        return;
-                    }
-                    throw new InvalidOperationException(configurationError);
-                }
+                LayoutPlan plan = TilePaletteBuilder.CreatePlan(profile);
+                if (plan.HasBlockingConflicts)
+                    throw new InvalidOperationException(string.Join("\n", plan.Errors));
+                if (plan.HasConfirmedMoves && !EditorUtility.DisplayDialog(
+                        "Confirm Palette Changes",
+                        "Known Tiles will exchange occupied Profile cells. Continue?",
+                        "Build",
+                        "Cancel"))
+                    return;
 
-                SourceScanResult sourceScan =
-                    TilePaletteSourceScanner.Scan(profile.SourceFolderPath, true);
-                if (!sourceScan.IsValid)
-                    throw new InvalidOperationException(string.Join("\n", sourceScan.errors));
-                busy = true;
-                analyzedLayout = null;
-                new TilePaletteVisionAnalyzer().Analyze(
-                    new InferenceRequest
-                    {
-                        sources = sourceScan,
-                        customTemplates = profile.CustomTemplates
-                    },
-                    (layout, error) =>
-                    {
-                        busy = false;
-                        if (!string.IsNullOrWhiteSpace(error) || layout == null)
-                        {
-                            Debug.LogError("[TilePalette] 分析失败：" + (string.IsNullOrWhiteSpace(error) ? "视觉模型未返回布局。" : error));
-                            Repaint();
-                            return;
-                        }
-
-                        analyzedLayout = layout;
-                        Debug.Log("[TilePalette] 分析完成");
-                        if (layout.confidence < 0.65f)
-                            Debug.LogWarning("[TilePalette] 视觉布局置信度较低，请检查二维预览。");
-                        Repaint();
-                    });
-            }
-            catch (Exception exception)
-            {
-                busy = false;
-                Debug.LogError("[TilePalette] 分析失败：" + exception.Message);
-                Repaint();
-            }
+                TilePaletteBuilder.Apply(profile);
+                Debug.Log("[TilePalette] 构建完成");
+            });
         }
 
-        private void ValidateLayout()
+        private void ValidatePalette()
         {
-            RunAction("验证", () =>
+            Run("验证", () =>
             {
-                LayoutPlan validationPlan = TilePaletteBuilder.CreatePlan(profile);
                 TilePaletteBuilder.ValidateComplete(profile);
-                string details = string.Join("\n", validationPlan.items
-                    .Where(item => item.action == LayoutPlanAction.Orphan)
-                    .Select(item => item.diagnostic)
-                    .Where(value => !string.IsNullOrWhiteSpace(value))
-                    .Distinct(StringComparer.Ordinal));
-                if (string.IsNullOrWhiteSpace(details)) Debug.Log("[TilePalette] 验证通过");
-                else Debug.LogWarning("[TilePalette] 验证发现问题：\n" + details);
+                Debug.Log("[TilePalette] 验证通过");
             });
         }
 
-        private void ApplyBuild()
-        {
-            RunAction("构建", () =>
-            {
-                string profileBefore = EditorJsonUtility.ToJson(profile);
-                try
-                {
-                    if (analyzedLayout != null)
-                    {
-                        SourceScanResult currentScan = TilePaletteSourceScanner.Scan(profile.SourceFolderPath, true);
-                        if (!currentScan.IsValid)
-                            throw new InvalidOperationException(string.Join("\n", currentScan.errors));
-                        Undo.RecordObject(profile, "Apply Visual Tile Layout");
-                        TilePaletteProfileUtility.ApplyAnalyzedLayout(
-                            profile,
-                            analyzedLayout,
-                            currentScan.sprites.Select(value => value.resourceId),
-                            true);
-                        using (TilePaletteAutoSyncGuard.Suppress()) AssetDatabase.SaveAssets();
-                    }
-                    else if (!profile.Groups.SelectMany(group => group.entries).Any(entry => entry.included))
-                    {
-                        throw new InvalidOperationException("Profile 还没有布局。请先点击 Analyze Layout。");
-                    }
-
-                    LayoutPlan preview = TilePaletteBuilder.CreatePlan(profile);
-                    if (preview.HasBlockingConflicts)
-                        throw new InvalidOperationException(string.Join("\n", preview.BlockingConflicts
-                            .Select(item => item.diagnostic).Distinct(StringComparer.Ordinal)));
-                    if (preview.HasConfirmedMoves && !EditorUtility.DisplayDialog(
-                            "Confirm Layout Changes",
-                            "The saved Profile requires Tile swaps or cyclic moves. Continue?",
-                            "Build",
-                            "Cancel"))
-                    {
-                        RestoreProfile(profileBefore);
-                        return;
-                    }
-
-                    TilePaletteBuilder.Apply(profile, false);
-                    Debug.Log("[TilePalette] 构建完成");
-                }
-                catch
-                {
-                    RestoreProfile(profileBefore);
-                    throw;
-                }
-            });
-        }
-
-        private void RestoreProfile(string json)
-        {
-            EditorJsonUtility.FromJsonOverwrite(json, profile);
-            EditorUtility.SetDirty(profile);
-            using (TilePaletteAutoSyncGuard.Suppress()) AssetDatabase.SaveAssets();
-        }
-
-        private void RunAction(string operation, Action action)
+        private void Run(string operation, Action action)
         {
             try
             {
@@ -277,7 +194,7 @@ namespace TilePaletteLayoutStudio
             }
             catch (Exception exception)
             {
-                Debug.LogError($"[TilePalette] {operation}失败：{exception.Message}");
+                Debug.LogError("[TilePalette] " + operation + "失败：" + exception.Message);
             }
             finally
             {
@@ -285,9 +202,11 @@ namespace TilePaletteLayoutStudio
             }
         }
 
-        private void ResetAnalysis()
+        private sealed class PreviewEntry
         {
-            analyzedLayout = null;
+            public TilePaletteProfileGroup Group;
+            public TilePaletteProfileEntry Entry;
+            public Vector3Int Position;
         }
     }
 }

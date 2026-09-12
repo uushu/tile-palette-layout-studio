@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -12,95 +11,68 @@ namespace TilePaletteLayoutStudio
         private static int suppressionDepth;
         public static bool IsSuppressed => suppressionDepth > 0;
 
-        public static IDisposable Suppress()
+        public static void SaveAssetsWithoutSync()
         {
             suppressionDepth++;
-            return new Scope();
-        }
-
-        private sealed class Scope : IDisposable
-        {
-            private bool disposed;
-
-            public void Dispose()
+            try
             {
-                if (disposed) return;
-                disposed = true;
-                suppressionDepth = Math.Max(0, suppressionDepth - 1);
+                AssetDatabase.SaveAssets();
+            }
+            finally
+            {
+                suppressionDepth--;
             }
         }
     }
 
-    internal sealed class TilePaletteAutoSyncSaveProcessor : AssetModificationProcessor
+    internal sealed class TilePaletteSaveProcessor : AssetModificationProcessor
     {
+        private static readonly HashSet<string> PendingPalettePaths = new HashSet<string>(StringComparer.Ordinal);
+        private static bool scheduled;
+
         private static string[] OnWillSaveAssets(string[] paths)
         {
-            if (TilePaletteAutoSyncGuard.IsSuppressed || paths == null || paths.Length == 0)
-                return paths;
-
-            HashSet<string> saved = new HashSet<string>(paths.Select(Normalize), StringComparer.OrdinalIgnoreCase);
+            if (TilePaletteAutoSyncGuard.IsSuppressed || paths == null) return paths;
+            HashSet<string> saved = new HashSet<string>(paths, StringComparer.Ordinal);
             foreach (TilePaletteProfile profile in TilePaletteProfileStore.FindAll())
             {
-                if (!string.IsNullOrEmpty(profile.PalettePrefabPath) && saved.Contains(Normalize(profile.PalettePrefabPath)))
-                    TilePaletteAutoSyncScheduler.Queue(profile);
+                if (!string.IsNullOrWhiteSpace(profile.PalettePrefabPath) && saved.Contains(profile.PalettePrefabPath))
+                    PendingPalettePaths.Add(profile.PalettePrefabPath);
+            }
+
+            if (PendingPalettePaths.Count > 0 && !scheduled)
+            {
+                scheduled = true;
+                EditorApplication.delayCall += SyncSavedPalettes;
             }
             return paths;
         }
 
-        private static string Normalize(string path)
+        private static void SyncSavedPalettes()
         {
-            return (path ?? string.Empty)
-                .Replace(Path.DirectorySeparatorChar, '/')
-                .Replace(Path.AltDirectorySeparatorChar, '/');
-        }
-    }
+            scheduled = false;
+            string[] paths = PendingPalettePaths.ToArray();
+            PendingPalettePaths.Clear();
+            bool changed = false;
 
-    [InitializeOnLoad]
-    internal static class TilePaletteAutoSyncScheduler
-    {
-        private static bool queued;
-        private static readonly HashSet<string> QueuedProfileGuids = new HashSet<string>(StringComparer.Ordinal);
-
-        static TilePaletteAutoSyncScheduler()
-        {
-        }
-
-        public static void Queue(TilePaletteProfile profile)
-        {
-            if (profile == null) return;
-            string guid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(profile));
-            if (!string.IsNullOrWhiteSpace(guid)) QueuedProfileGuids.Add(guid);
-            if (queued) return;
-            queued = true;
-            EditorApplication.delayCall += Run;
-        }
-
-        private static void Run()
-        {
-            queued = false;
-            if (TilePaletteAutoSyncGuard.IsSuppressed ||
-                EditorApplication.isCompiling ||
-                EditorApplication.isPlayingOrWillChangePlaymode)
-                return;
-
-            string[] profileGuids = QueuedProfileGuids.ToArray();
-            QueuedProfileGuids.Clear();
-            foreach (string guid in profileGuids)
+            foreach (TilePaletteProfile profile in TilePaletteProfileStore.FindAll()
+                         .Where(profile => paths.Contains(profile.PalettePrefabPath, StringComparer.Ordinal)))
             {
-                TilePaletteProfile profile = AssetDatabase.LoadAssetAtPath<TilePaletteProfile>(AssetDatabase.GUIDToAssetPath(guid));
-                if (profile == null || profile.Groups.Count == 0) continue;
                 try
                 {
-                    TilePaletteAutoSyncResult result = TilePaletteBuilder.SyncManualChangesAutomatically(profile);
+                    TilePaletteSyncResult result = TilePaletteBuilder.SyncPaletteToProfile(profile);
+                    changed |= result.HasChanges;
                     foreach (string warning in result.warnings.Distinct(StringComparer.Ordinal))
-                        Debug.LogWarning(warning);
-                    if (result.HasChanges) Debug.Log("[TilePalette] 自动同步完成");
+                        Debug.LogWarning("[TilePalette] 自动同步警告：" + warning);
                 }
                 catch (Exception exception)
                 {
                     Debug.LogError("[TilePalette] 自动同步失败：" + exception.Message);
                 }
             }
+
+            if (changed) Debug.Log("[TilePalette] 自动同步完成");
+            TilePaletteLayoutStudioWindow.RepaintOpenWindows();
         }
     }
 }

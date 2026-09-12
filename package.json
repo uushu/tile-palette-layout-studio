@@ -3,7 +3,7 @@
   "displayName": "Tile Palette Layout Studio",
   "version": "0.1.0",
   "unity": "2022.3",
-  "description": "A Unity Editor extension that reconstructs structured Tile Palette layouts from loose Sprite assets using visual analysis.",
+  "description": "A Unity Editor extension that applies reviewed layout Recipes to Profiles, previews them, builds Tile Palettes, and syncs manual edits.",
   "keywords": [
     "2d",
     "tile",
@@ -18,13 +18,12 @@
   "dependencies": {
     "com.unity.modules.imageconversion": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0",
-    "com.unity.modules.tilemap": "1.0.0",
-    "com.unity.modules.unitywebrequest": "1.0.0"
+    "com.unity.modules.tilemap": "1.0.0"
   },
   "samples": [
     {
       "displayName": "Layout Templates",
-      "description": "Optional project template examples for visual layout analysis.",
+      "description": "Optional project template examples for reviewed layout Recipes.",
       "path": "Samples~/Layout Templates"
     }
   ],

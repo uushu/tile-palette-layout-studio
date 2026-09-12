@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -9,31 +11,38 @@ using UnityEngine.Tilemaps;
 
 namespace TilePaletteLayoutStudio
 {
-    internal sealed class DefaultTileAssetFactory : ITileAssetFactory
+    internal enum LayoutPlanAction
     {
-        public bool CanReuse(TileBase tile, Sprite expectedSprite, out string diagnostic)
-        {
-            if (tile is Tile plainTile && plainTile.sprite == expectedSprite)
-            {
-                diagnostic = string.Empty;
-                return true;
-            }
-            diagnostic = tile == null ? "Tile 为空。" : $"{tile.name} 是无法安全解析来源的 {tile.GetType().Name}。";
-            return false;
-        }
+        Keep,
+        Create,
+        Place,
+        Move,
+        Conflict
+    }
 
-        public TileBase Create(Sprite sprite, string assetPath)
-        {
-            Tile tile = ScriptableObject.CreateInstance<Tile>();
-            tile.name = sprite.name;
-            tile.sprite = sprite;
-            tile.color = Color.white;
-            tile.transform = Matrix4x4.identity;
-            tile.flags = TileFlags.LockColor;
-            tile.colliderType = Tile.ColliderType.Sprite;
-            AssetDatabase.CreateAsset(tile, assetPath);
-            return tile;
-        }
+    internal sealed class LayoutPlanItem
+    {
+        public LayoutPlanAction action;
+        public TilePaletteProfileGroup group;
+        public TilePaletteProfileEntry entry;
+        public TileBase tile;
+        public Vector3Int? currentPosition;
+        public Vector3Int targetPosition;
+        public string diagnostic;
+        public bool requiresConfirmation;
+    }
+
+    internal sealed class LayoutPlan
+    {
+        public readonly List<LayoutPlanItem> items = new List<LayoutPlanItem>();
+        public int Count(LayoutPlanAction action) => items.Count(item => item.action == action);
+        public bool HasBlockingConflicts => items.Any(item => item.action == LayoutPlanAction.Conflict);
+        public bool HasConfirmedMoves => items.Any(item => item.requiresConfirmation);
+        public IEnumerable<string> Errors => items
+            .Where(item => item.action == LayoutPlanAction.Conflict)
+            .Select(item => item.diagnostic)
+            .Where(message => !string.IsNullOrWhiteSpace(message))
+            .Distinct(StringComparer.Ordinal);
     }
 
     internal sealed class TilePaletteBuildResult
@@ -42,8 +51,15 @@ namespace TilePaletteLayoutStudio
         public int placed;
         public int moved;
         public int kept;
-        public int removed;
-        public string message;
+    }
+
+    internal sealed class TilePaletteSyncResult
+    {
+        public int moved;
+        public int deleted;
+        public int restored;
+        public readonly List<string> warnings = new List<string>();
+        public bool HasChanges => moved > 0 || deleted > 0 || restored > 0;
     }
 
     internal static class TilePaletteProfileStore
@@ -56,7 +72,7 @@ namespace TilePaletteLayoutStudio
                 .Select(AssetDatabase.GUIDToAssetPath)
                 .Select(AssetDatabase.LoadAssetAtPath<TilePaletteProfile>)
                 .Where(profile => profile != null)
-                .OrderBy(profile => AssetDatabase.GetAssetPath(profile), StringComparer.Ordinal)
+                .OrderBy(AssetDatabase.GetAssetPath, StringComparer.Ordinal)
                 .ToArray();
         }
 
@@ -65,7 +81,8 @@ namespace TilePaletteLayoutStudio
             string guid = EditorPrefs.GetString(PreferredProfileKey, string.Empty);
             if (!string.IsNullOrWhiteSpace(guid))
             {
-                TilePaletteProfile preferred = AssetDatabase.LoadAssetAtPath<TilePaletteProfile>(AssetDatabase.GUIDToAssetPath(guid));
+                TilePaletteProfile preferred = AssetDatabase.LoadAssetAtPath<TilePaletteProfile>(
+                    AssetDatabase.GUIDToAssetPath(guid));
                 if (preferred != null) return preferred;
             }
             return FindAll().FirstOrDefault();
@@ -78,19 +95,18 @@ namespace TilePaletteLayoutStudio
                 EditorPrefs.DeleteKey(PreferredProfileKey);
                 return;
             }
-            EditorPrefs.SetString(PreferredProfileKey, AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(profile)));
+            EditorPrefs.SetString(
+                PreferredProfileKey,
+                AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(profile)));
         }
 
         public static TilePaletteProfile CreateProfile()
         {
             TilePaletteProfile profile = ScriptableObject.CreateInstance<TilePaletteProfile>();
             profile.name = "TilePaletteProfile";
-            string discovered = TilePaletteSourceScanner.DiscoverSourceFolder(null);
-            if (!string.IsNullOrWhiteSpace(discovered))
-                profile.SourceFolder = AssetDatabase.LoadAssetAtPath<DefaultAsset>(discovered);
             string path = AssetDatabase.GenerateUniqueAssetPath("Assets/TilePaletteProfile.asset");
             AssetDatabase.CreateAsset(profile, path);
-            AssetDatabase.SaveAssets();
+            TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
             SetPreferred(profile);
             return profile;
         }
@@ -98,473 +114,400 @@ namespace TilePaletteLayoutStudio
 
     internal static class TilePaletteBuilder
     {
+        internal static Action AfterPrefabSavedForValidation;
+
         public static LayoutPlan CreatePlan(TilePaletteProfile profile)
         {
             ValidateProfile(profile);
             TileAssetIndex assets = TileAssetIndex.Load(profile);
-            PaletteSnapshot palette = PaletteSnapshot.Load(profile, assets);
+            PaletteSnapshot palette = PaletteSnapshot.Load(profile);
             LayoutPlan plan = new LayoutPlan();
-            Dictionary<Vector3Int, TilePaletteProfileEntry> desiredCells = new Dictionary<Vector3Int, TilePaletteProfileEntry>();
+            Dictionary<TilePaletteProfileEntry, TileBase> resolved = new Dictionary<TilePaletteProfileEntry, TileBase>();
             HashSet<TileBase> desiredTiles = new HashSet<TileBase>();
+
+            foreach (string conflict in assets.Conflicts)
+                plan.items.Add(Conflict(conflict));
+
+            foreach (TilePaletteProfileEntry entry in profile.IncludedEntries)
+            {
+                TileBase tile = assets.Resolve(entry);
+                resolved[entry] = tile;
+                if (tile != null && !desiredTiles.Add(tile))
+                    plan.items.Add(Conflict("The same Tile is assigned more than once: " + tile.name));
+            }
 
             foreach (TilePaletteProfileGroup group in profile.Groups)
             {
                 foreach (TilePaletteProfileEntry entry in group.entries.Where(value => value.included))
                 {
                     Vector3Int target = TilePaletteProfileUtility.GetTargetPosition(group, entry);
-                    if (!desiredCells.TryAdd(target, entry))
+                    TileBase tile = resolved[entry];
+                    if (tile == null)
                     {
-                        plan.items.Add(NewItem(LayoutPlanAction.Conflict, group, entry, null, null, target, "Profile 目标坐标重复。"));
+                        plan.items.Add(Item(LayoutPlanAction.Create, group, entry, null, null, target));
                         continue;
                     }
 
-                    TileBase tile = assets.Resolve(entry);
-                    if (tile == null)
-                    {
-                        plan.items.Add(NewItem(LayoutPlanAction.Create, group, entry, null, null, target, "缺少普通 Tile 资源；构建时创建。"));
-                        continue;
-                    }
-                    desiredTiles.Add(tile);
-                    List<Vector3Int> currentPositions = palette.Positions(tile);
+                    IReadOnlyList<Vector3Int> currentPositions = palette.Positions(tile);
                     if (currentPositions.Count > 1)
                     {
-                        Vector3Int retained = currentPositions.Contains(target)
-                            ? target
-                            : currentPositions.OrderBy(position => position.x).ThenBy(position => position.y).First();
-                        foreach (Vector3Int duplicate in currentPositions.Where(position => position != retained))
-                        {
-                            plan.items.Add(NewItem(
-                                LayoutPlanAction.Orphan,
-                                group,
-                                entry,
-                                tile,
-                                duplicate,
-                                null,
-                                $"{entry.sourceId} 重复；构建时保留 {retained}，删除额外格 {duplicate}。"));
-                        }
-                        currentPositions = new List<Vector3Int> { retained };
+                        plan.items.Add(Conflict("Tile appears in multiple Palette cells: " + tile.name));
+                        continue;
                     }
 
                     TileBase targetTile = palette.TileAt(target);
-                    if (targetTile == tile)
+                    if (targetTile == tile && currentPositions.Count == 1)
                     {
-                        plan.items.Add(NewItem(LayoutPlanAction.Keep, group, entry, tile, target, target, string.Empty));
+                        plan.items.Add(Item(LayoutPlanAction.Keep, group, entry, tile, target, target));
+                        continue;
                     }
-                    else if (targetTile != null)
+
+                    if (targetTile != null && !desiredTiles.Contains(targetTile))
                     {
-                        string targetName = targetTile.name;
-                        plan.items.Add(NewItem(LayoutPlanAction.Conflict, group, entry, tile, currentPositions.Count == 0 ? (Vector3Int?)null : currentPositions[0], target, $"目标格已被 {targetName} 占用。"));
+                        plan.items.Add(Conflict(
+                            "Target cell " + target + " is occupied by a Tile outside the Profile: " + targetTile.name));
+                        continue;
                     }
-                    else if (currentPositions.Count == 1)
-                    {
-                        plan.items.Add(NewItem(LayoutPlanAction.Move, group, entry, tile, currentPositions[0], target, string.Empty));
-                    }
-                    else
-                    {
-                        plan.items.Add(NewItem(LayoutPlanAction.Place, group, entry, tile, null, target, string.Empty));
-                    }
+
+                    LayoutPlanItem item = Item(
+                        currentPositions.Count == 1 ? LayoutPlanAction.Move : LayoutPlanAction.Place,
+                        group,
+                        entry,
+                        tile,
+                        currentPositions.Count == 1 ? currentPositions[0] : (Vector3Int?)null,
+                        target);
+                    item.requiresConfirmation = targetTile != null && targetTile != tile;
+                    plan.items.Add(item);
                 }
             }
 
-            foreach (LayoutPlanItem item in plan.items.Where(value => value.action == LayoutPlanAction.Conflict && value.targetPosition.HasValue && value.tile != null).ToArray())
-            {
-                TileBase occupyingTile = palette.TileAt(item.targetPosition.Value);
-                if (occupyingTile == null) continue;
-                item.action = LayoutPlanAction.Move;
-                item.requiresConfirmation = desiredTiles.Contains(occupyingTile);
-                item.diagnostic = item.requiresConfirmation
-                    ? "目标格由另一个已知 Tile 占据；完整构建会按确认后的 Profile 执行交换/循环移动。"
-                    : $"目标格中的未知 Tile {occupyingTile.name} 会从 Palette 删除，项目资源文件保留。";
-            }
-
-            foreach (KeyValuePair<Vector3Int, TileBase> current in palette.byPosition)
-            {
-                if (desiredTiles.Contains(current.Value)) continue;
-                if (!TilePaletteProfileUtility.IsManagedCell(profile, current.Key)) continue;
-                plan.items.Add(NewItem(
-                    LayoutPlanAction.Orphan,
-                    null,
-                    null,
-                    current.Value,
-                    current.Key,
-                    null,
-                    $"未知 Tile {current.Value.name} 会从 Palette 删除，项目资源文件保留。"));
-            }
-            foreach (string conflict in assets.conflicts)
-                plan.items.Add(NewItem(LayoutPlanAction.Conflict, null, null, null, null, null, conflict));
             return plan;
         }
 
-        public static TilePaletteBuildResult Apply(TilePaletteProfile profile, bool safeOnly)
+        public static TilePaletteBuildResult Apply(TilePaletteProfile profile)
         {
-            if (EditorApplication.isCompiling || EditorApplication.isPlayingOrWillChangePlaymode)
-                throw new InvalidOperationException("请退出 Play Mode 并等待编译结束。" );
             PrefabStage stage = PrefabStageUtility.GetCurrentPrefabStage();
             if (stage != null && string.Equals(stage.assetPath, profile.PalettePrefabPath, StringComparison.Ordinal))
-                throw new InvalidOperationException("请先关闭目标 Palette Prefab 编辑模式。" );
+                throw new InvalidOperationException("Close the Palette Prefab editing stage before Build.");
 
-            LayoutPlan initialPlan = CreatePlan(profile);
-            if (initialPlan.HasBlockingConflicts)
-                throw new InvalidOperationException("存在阻止写入的冲突：\n" + string.Join("\n", initialPlan.BlockingConflicts.Select(item => item.diagnostic).Distinct()));
-            if (safeOnly && initialPlan.HasConfirmedMoves)
-                throw new InvalidOperationException("计划包含交换或循环移动；请使用 Build or Update 并确认差异。" );
-
-            byte[] prefabBackup = File.ReadAllBytes(AbsolutePath(profile.PalettePrefabPath));
+            LayoutPlan preflight = CreatePlan(profile);
+            ThrowIfConflicts(preflight);
             string profileBackup = EditorJsonUtility.ToJson(profile);
-            List<string> createdPaths = new List<string>();
-            using (TilePaletteAutoSyncGuard.Suppress())
+            string prefabPath = profile.PalettePrefabPath;
+            string absolutePrefabPath = AbsolutePath(prefabPath);
+            byte[] prefabBackup = File.ReadAllBytes(absolutePrefabPath);
+            List<string> createdAssets = new List<string>();
+
             try
             {
-                foreach (LayoutPlanItem item in initialPlan.items.Where(value =>
-                             value.entry != null && value.tile != null && value.entry.tile == null))
-                    item.entry.tile = item.tile;
-
-                ITileAssetFactory factory = new DefaultTileAssetFactory();
-                foreach (LayoutPlanItem item in initialPlan.items.Where(value => value.action == LayoutPlanAction.Create))
+                foreach (LayoutPlanItem item in preflight.items.Where(value => value.action == LayoutPlanAction.Create))
                 {
-                    string path = UniqueTilePath(profile.TileOutputFolderPath, item.entry.sourceId);
-                    item.entry.tile = factory.Create(item.entry.sprite, path);
-                    createdPaths.Add(path);
+                    string tilePath = UniqueTilePath(profile.TileOutputFolderPath, item.entry.sourceId);
+                    Tile tile = ScriptableObject.CreateInstance<Tile>();
+                    tile.name = item.entry.sprite.name;
+                    tile.sprite = item.entry.sprite;
+                    tile.color = Color.white;
+                    tile.transform = Matrix4x4.identity;
+                    tile.flags = TileFlags.LockColor;
+                    tile.colliderType = Tile.ColliderType.Sprite;
+                    AssetDatabase.CreateAsset(tile, tilePath);
+                    createdAssets.Add(tilePath);
+                    item.entry.tile = tile;
+                    EditorUtility.SetDirty(profile);
                 }
-                AssetDatabase.SaveAssets();
+                TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
 
                 LayoutPlan plan = CreatePlan(profile);
-                if (plan.HasBlockingConflicts)
-                    throw new InvalidOperationException("创建 Tile 后计划出现冲突。" );
-                if (safeOnly && plan.HasConfirmedMoves)
-                    throw new InvalidOperationException("创建 Tile 后计划包含需要确认的移动。" );
-                GameObject root = PrefabUtility.LoadPrefabContents(profile.PalettePrefabPath);
+                ThrowIfConflicts(plan);
+                GameObject root = PrefabUtility.LoadPrefabContents(prefabPath);
                 try
                 {
-                    Tilemap tilemap = RequireTilemap(root, profile.PalettePrefabPath);
-                    foreach (LayoutPlanItem item in plan.items.Where(value => value.action == LayoutPlanAction.Move))
+                    Tilemap tilemap = RequireTilemap(root, prefabPath);
+                    HashSet<TileBase> movingTiles = plan.items
+                        .Where(item => item.action == LayoutPlanAction.Move)
+                        .Select(item => item.tile)
+                        .ToHashSet();
+
+                    foreach (Vector3Int position in tilemap.cellBounds.allPositionsWithin)
                     {
-                        if (item.currentPosition.HasValue && tilemap.GetTile(item.currentPosition.Value) == item.tile)
-                            tilemap.SetTile(item.currentPosition.Value, null);
+                        TileBase current = tilemap.GetTile(position);
+                        if (current != null && movingTiles.Contains(current))
+                            tilemap.SetTile(position, null);
                     }
-                    foreach (LayoutPlanItem item in plan.items.Where(value => value.action == LayoutPlanAction.Orphan))
-                    {
-                        if (item.currentPosition.HasValue && tilemap.GetTile(item.currentPosition.Value) == item.tile)
-                            tilemap.SetTile(item.currentPosition.Value, null);
-                    }
-                    foreach (LayoutPlanItem item in plan.items.Where(value => value.action == LayoutPlanAction.Place || value.action == LayoutPlanAction.Move))
-                    {
-                        if (!item.targetPosition.HasValue || tilemap.GetTile(item.targetPosition.Value) != null)
-                            throw new InvalidOperationException("应用期间目标格状态已变化：" + item.targetPosition);
-                        tilemap.SetTile(item.targetPosition.Value, item.tile);
-                    }
+
+                    foreach (LayoutPlanItem item in plan.items.Where(value =>
+                                 value.action == LayoutPlanAction.Place || value.action == LayoutPlanAction.Move))
+                        tilemap.SetTile(item.targetPosition, item.tile);
+
                     tilemap.CompressBounds();
                     EditorUtility.SetDirty(tilemap);
-                    if (PrefabUtility.SaveAsPrefabAsset(root, profile.PalettePrefabPath) == null)
-                        throw new InvalidOperationException("Unity 无法保存 Palette Prefab。" );
+                    if (PrefabUtility.SaveAsPrefabAsset(root, prefabPath) == null)
+                        throw new InvalidOperationException("Unity failed to save the Palette Prefab.");
+                    AfterPrefabSavedForValidation?.Invoke();
                 }
                 finally
                 {
                     PrefabUtility.UnloadPrefabContents(root);
                 }
 
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                string validation = ValidateComplete(profile);
+                AssetDatabase.ImportAsset(prefabPath, ImportAssetOptions.ForceUpdate);
+                ValidateComplete(profile);
                 profile.MarkBuilt(CalculateLayoutHash(profile));
                 EditorUtility.SetDirty(profile);
-                AssetDatabase.SaveAssets();
+                TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
+                LayoutPlan complete = CreatePlan(profile);
                 return new TilePaletteBuildResult
                 {
-                    created = createdPaths.Count,
-                    placed = plan.Count(LayoutPlanAction.Place),
+                    created = createdAssets.Count,
+                    placed = complete.Count(LayoutPlanAction.Place),
                     moved = plan.Count(LayoutPlanAction.Move),
-                    kept = plan.Count(LayoutPlanAction.Keep),
-                    removed = plan.Count(LayoutPlanAction.Orphan),
-                    message = validation
+                    kept = complete.Count(LayoutPlanAction.Keep)
                 };
             }
             catch
             {
-                File.WriteAllBytes(AbsolutePath(profile.PalettePrefabPath), prefabBackup);
-                foreach (string createdPath in createdPaths) AssetDatabase.DeleteAsset(createdPath);
+                File.WriteAllBytes(absolutePrefabPath, prefabBackup);
+                AssetDatabase.ImportAsset(prefabPath, ImportAssetOptions.ForceUpdate);
                 EditorJsonUtility.FromJsonOverwrite(profileBackup, profile);
                 EditorUtility.SetDirty(profile);
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                foreach (string createdAsset in createdAssets)
+                    AssetDatabase.DeleteAsset(createdAsset);
+                TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
                 throw;
             }
         }
 
         public static string ValidateComplete(TilePaletteProfile profile)
         {
-            ValidateProfile(profile);
             LayoutPlan plan = CreatePlan(profile);
-            int incomplete = plan.Count(LayoutPlanAction.Create) + plan.Count(LayoutPlanAction.Place) + plan.Count(LayoutPlanAction.Move);
-            if (plan.HasBlockingConflicts || incomplete > 0)
-                throw new InvalidOperationException($"验证失败：{plan.Count(LayoutPlanAction.Conflict)} 个冲突，{incomplete} 个未完成项。" );
-            return "验证通过";
+            ThrowIfConflicts(plan);
+            int incomplete = plan.Count(LayoutPlanAction.Create) +
+                             plan.Count(LayoutPlanAction.Place) +
+                             plan.Count(LayoutPlanAction.Move);
+            if (incomplete > 0)
+                throw new InvalidOperationException("Palette has " + incomplete + " unapplied Profile cells.");
+            return CalculateLayoutHash(profile);
         }
 
-        public static ManualSyncProposal AnalyzeManualChanges(TilePaletteProfile profile)
+        public static TilePaletteSyncResult SyncPaletteToProfile(TilePaletteProfile profile)
         {
             ValidateProfile(profile);
             TileAssetIndex assets = TileAssetIndex.Load(profile);
-            PaletteSnapshot palette = PaletteSnapshot.Load(profile, assets);
-            ManualSyncProposal proposal = new ManualSyncProposal();
-            foreach (TilePaletteProfileGroup group in profile.Groups)
-            {
-                List<ManualSyncChange> changes = new List<ManualSyncChange>();
-                foreach (TilePaletteProfileEntry entry in group.entries.Where(value => value.included))
-                {
-                    TileBase tile = assets.Resolve(entry);
-                    List<Vector3Int> positions = tile == null ? new List<Vector3Int>() : palette.Positions(tile);
-                    if (positions.Count > 1)
-                    {
-                        proposal.conflicts.Add(entry.sourceId + " 在 Palette 中出现多次。" );
-                        continue;
-                    }
-                    Vector3Int expected = TilePaletteProfileUtility.GetTargetPosition(group, entry);
-                    if (positions.Count == 0)
-                        changes.Add(new ManualSyncChange { group = group, entry = entry, isMissing = true });
-                    else if (positions[0] != expected)
-                        changes.Add(new ManualSyncChange { group = group, entry = entry, currentPosition = positions[0], delta = positions[0] - expected });
-                }
+            if (assets.Conflicts.Count > 0)
+                throw new InvalidOperationException(string.Join("\n", assets.Conflicts));
 
-                int includedCount = group.entries.Count(value => value.included);
-                if (changes.Count == includedCount && changes.All(value => !value.isMissing) && changes.Select(value => value.delta).Distinct().Count() == 1)
-                    proposal.groupTranslations[group] = changes[0].delta;
-                else
-                    proposal.entryChanges.AddRange(changes);
-
-                foreach (TilePaletteProfileEntry entry in group.entries.Where(value => !value.included))
-                {
-                    TileBase tile = assets.Resolve(entry);
-                    List<Vector3Int> positions = tile == null ? new List<Vector3Int>() : palette.Positions(tile);
-                    if (positions.Count > 1)
-                    {
-                        proposal.conflicts.Add(entry.sourceId + " 在 Palette 中出现多次。" );
-                        continue;
-                    }
-                    if (positions.Count == 1)
-                    {
-                        proposal.entryChanges.Add(new ManualSyncChange
-                        {
-                            group = group,
-                            entry = entry,
-                            currentPosition = positions[0],
-                            isReactivated = true
-                        });
-                    }
-                }
-            }
-
-            HashSet<TileBase> managed = new HashSet<TileBase>(
-                profile.Groups.SelectMany(group => group.entries).Select(assets.Resolve).Where(tile => tile != null));
-            foreach (KeyValuePair<Vector3Int, TileBase> pair in palette.byPosition.Where(pair =>
-                         !managed.Contains(pair.Value) &&
-                         TilePaletteProfileUtility.IsManagedCell(profile, pair.Key)))
-                proposal.conflicts.Add($"未知 Tile {pair.Value.name} 位于 {pair.Key}，不会自动加入 Profile。" );
-            return proposal;
-        }
-
-        public static void AcceptManualChanges(
-            TilePaletteProfile profile,
-            ManualSyncProposal proposal,
-            bool acceptMissingAsDisabled,
-            bool allowSafeChangesWithConflicts = false)
-        {
-            if (proposal.conflicts.Count > 0 && !allowSafeChangesWithConflicts)
-                throw new InvalidOperationException("存在手工同步冲突，必须先处理。" );
-            Undo.RecordObject(profile, "Accept Tile Palette Manual Changes");
-            foreach (KeyValuePair<TilePaletteProfileGroup, Vector3Int> translation in proposal.groupTranslations)
-            {
-                translation.Key.origin += translation.Value;
-                translation.Key.inferenceSource = LayoutInferenceSource.Manual;
-            }
-            foreach (ManualSyncChange change in proposal.entryChanges)
-            {
-                if (change.isReactivated)
-                {
-                    change.entry.included = true;
-                    change.entry.hasManualOverride = true;
-                    change.entry.manualOverride = change.currentPosition.Value - change.group.origin;
-                    change.group.inferenceSource = LayoutInferenceSource.Manual;
-                    continue;
-                }
-                if (change.isMissing)
-                {
-                    if (!acceptMissingAsDisabled) throw new InvalidOperationException(change.entry.sourceId + " 已从 Palette 删除；需要明确允许停用。" );
-                    change.entry.included = false;
-                    continue;
-                }
-                change.entry.hasManualOverride = true;
-                change.entry.manualOverride = change.currentPosition.Value - change.group.origin;
-                change.group.inferenceSource = LayoutInferenceSource.Manual;
-            }
-            EditorUtility.SetDirty(profile);
-            AssetDatabase.SaveAssets();
-        }
-
-        public static TilePaletteAutoSyncResult SyncManualChangesAutomatically(TilePaletteProfile profile)
-        {
-            TilePaletteAutoSyncResult result = new TilePaletteAutoSyncResult();
+            PaletteSnapshot palette = PaletteSnapshot.Load(profile);
             string profileBackup = EditorJsonUtility.ToJson(profile);
-            byte[] prefabBackup = File.ReadAllBytes(AbsolutePath(profile.PalettePrefabPath));
-            using (TilePaletteAutoSyncGuard.Suppress())
+            string profilePath = AssetDatabase.GetAssetPath(profile);
+            string absoluteProfilePath = AbsolutePath(profilePath);
+            byte[] profileFileBackup = File.ReadAllBytes(absoluteProfilePath);
+            TilePaletteSyncResult result = new TilePaletteSyncResult();
+            HashSet<TileBase> knownTiles = new HashSet<TileBase>();
+            Dictionary<TilePaletteProfileEntry, TileBase> resolved = profile.Groups
+                .SelectMany(group => group.entries)
+                .ToDictionary(entry => entry, entry => assets.Resolve(entry));
+
+            foreach (TileBase tile in resolved.Values.Where(tile => tile != null))
+                knownTiles.Add(tile);
+            foreach (KeyValuePair<Vector3Int, TileBase> cell in palette.Cells)
+            {
+                if (!knownTiles.Contains(cell.Value))
+                    result.warnings.Add("Unknown Tile was ignored at " + cell.Key + ": " + cell.Value.name);
+            }
+
             try
             {
-                CleanupPalette(profile, result);
-                ManualSyncProposal proposal = AnalyzeManualChanges(profile);
-                result.warnings.AddRange(proposal.conflicts.Select(conflict => "[TilePalette] 自动同步冲突：" + conflict));
-                if (proposal.HasChanges)
+                Undo.RecordObject(profile, "Sync Tile Palette Profile");
+                foreach (TilePaletteProfileGroup group in profile.Groups)
                 {
-                    result.translatedGroups = proposal.groupTranslations.Count;
-                    result.movedEntries = proposal.entryChanges.Count(change => !change.isMissing && !change.isReactivated);
-                    result.disabledEntries = proposal.entryChanges.Count(change => change.isMissing);
-                    result.reactivatedEntries = proposal.entryChanges.Count(change => change.isReactivated);
-                    AcceptManualChanges(profile, proposal, true, true);
+                    List<TilePaletteProfileEntry> included = group.entries.Where(entry => entry.included).ToList();
+                    Dictionary<TilePaletteProfileEntry, Vector3Int> found = new Dictionary<TilePaletteProfileEntry, Vector3Int>();
+                    foreach (TilePaletteProfileEntry entry in included)
+                    {
+                        TileBase tile = resolved[entry];
+                        if (tile == null) continue;
+                        IReadOnlyList<Vector3Int> positions = palette.Positions(tile);
+                        if (positions.Count > 1)
+                            throw new InvalidOperationException("Tile appears in multiple Palette cells: " + tile.name);
+                        if (positions.Count == 1) found[entry] = positions[0];
+                    }
+
+                    Vector3Int? sharedDelta = null;
+                    bool wholeGroupMoved = included.Count > 0 && found.Count == included.Count;
+                    foreach (KeyValuePair<TilePaletteProfileEntry, Vector3Int> pair in found)
+                    {
+                        Vector3Int expected = TilePaletteProfileUtility.GetTargetPosition(group, pair.Key);
+                        Vector3Int delta = pair.Value - expected;
+                        if (!sharedDelta.HasValue) sharedDelta = delta;
+                        else if (sharedDelta.Value != delta) wholeGroupMoved = false;
+                    }
+
+                    if (wholeGroupMoved && sharedDelta.HasValue && sharedDelta.Value != Vector3Int.zero)
+                    {
+                        group.origin += sharedDelta.Value;
+                        result.moved += included.Count;
+                    }
+                    else
+                    {
+                        foreach (TilePaletteProfileEntry entry in included)
+                        {
+                            if (!found.TryGetValue(entry, out Vector3Int current))
+                            {
+                                entry.included = false;
+                                result.deleted++;
+                                continue;
+                            }
+                            Vector3Int local = current - group.origin;
+                            if (entry.localPosition == local) continue;
+                            entry.localPosition = local;
+                            result.moved++;
+                        }
+                    }
+
+                    foreach (TilePaletteProfileEntry entry in group.entries.Where(entry => !entry.included))
+                    {
+                        TileBase tile = resolved[entry];
+                        if (tile == null) continue;
+                        IReadOnlyList<Vector3Int> positions = palette.Positions(tile);
+                        if (positions.Count > 1)
+                            throw new InvalidOperationException("Tile appears in multiple Palette cells: " + tile.name);
+                        if (positions.Count != 1) continue;
+                        entry.included = true;
+                        entry.localPosition = positions[0] - group.origin;
+                        result.restored++;
+                    }
                 }
+
+                ValidateProfile(profile);
+                if (result.HasChanges)
+                {
+                    EditorUtility.SetDirty(profile);
+                    TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
+                }
+                return result;
             }
             catch
             {
-                File.WriteAllBytes(AbsolutePath(profile.PalettePrefabPath), prefabBackup);
                 EditorJsonUtility.FromJsonOverwrite(profileBackup, profile);
                 EditorUtility.SetDirty(profile);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                File.WriteAllBytes(absoluteProfilePath, profileFileBackup);
+                AssetDatabase.ImportAsset(profilePath, ImportAssetOptions.ForceUpdate);
                 throw;
             }
-            return result;
-        }
-
-        private static void CleanupPalette(TilePaletteProfile profile, TilePaletteAutoSyncResult result)
-        {
-            ValidateProfile(profile);
-            TileAssetIndex assets = TileAssetIndex.Load(profile);
-            HashSet<TileBase> knownTiles = new HashSet<TileBase>(
-                profile.Groups.SelectMany(group => group.entries).Select(assets.Resolve).Where(tile => tile != null));
-            Dictionary<TileBase, Vector3Int> expected = profile.Groups
-                .SelectMany(group => group.entries.Where(entry => entry.included)
-                    .Select(entry => new
-                    {
-                        tile = assets.Resolve(entry),
-                        position = TilePaletteProfileUtility.GetTargetPosition(group, entry)
-                    }))
-                .Where(value => value.tile != null)
-                .GroupBy(value => value.tile)
-                .ToDictionary(group => group.Key, group => group.First().position);
-
-            GameObject root = PrefabUtility.LoadPrefabContents(profile.PalettePrefabPath);
-            bool changed = false;
-            try
-            {
-                Tilemap tilemap = RequireTilemap(root, profile.PalettePrefabPath);
-                Dictionary<TileBase, List<Vector3Int>> positions = new Dictionary<TileBase, List<Vector3Int>>();
-                foreach (Vector3Int position in tilemap.cellBounds.allPositionsWithin)
-                {
-                    TileBase tile = tilemap.GetTile(position);
-                    if (tile == null) continue;
-                    if (!knownTiles.Contains(tile))
-                    {
-                        if (!TilePaletteProfileUtility.IsManagedCell(profile, position))
-                            continue;
-                        tilemap.SetTile(position, null);
-                        changed = true;
-                        result.removedUnknownTiles++;
-                        result.warnings.Add(
-                            $"[TilePalette] {tile.name} 不在 Profile 中，已从格子 {position} 移除。");
-                        continue;
-                    }
-                    if (!positions.TryGetValue(tile, out List<Vector3Int> list))
-                    {
-                        list = new List<Vector3Int>();
-                        positions[tile] = list;
-                    }
-                    list.Add(position);
-                }
-
-                foreach (KeyValuePair<TileBase, List<Vector3Int>> pair in positions.Where(pair => pair.Value.Count > 1))
-                {
-                    if (!expected.TryGetValue(pair.Key, out Vector3Int target) || !pair.Value.Contains(target))
-                    {
-                        result.warnings.Add(
-                            $"[TilePalette] {pair.Key.name} 重复且位置不明确，出现于格子 {string.Join(", ", pair.Value)}，未同步。");
-                        continue;
-                    }
-                    foreach (Vector3Int duplicate in pair.Value.Where(position => position != target))
-                    {
-                        tilemap.SetTile(duplicate, null);
-                        changed = true;
-                        result.removedDuplicateTiles++;
-                        result.warnings.Add(
-                            $"[TilePalette] {pair.Key.name} 重复，已移除格子 {duplicate}。");
-                    }
-                }
-
-                if (!changed) return;
-                tilemap.CompressBounds();
-                EditorUtility.SetDirty(tilemap);
-                if (PrefabUtility.SaveAsPrefabAsset(root, profile.PalettePrefabPath) == null)
-                    throw new InvalidOperationException("Unity 无法保存清理后的 Palette Prefab.");
-            }
-            finally
-            {
-                PrefabUtility.UnloadPrefabContents(root);
-            }
-            AssetDatabase.SaveAssets();
         }
 
         public static string CalculateLayoutHash(TilePaletteProfile profile)
         {
-            string value = string.Join("|", profile.Groups.SelectMany(group => group.entries.Where(entry => entry.included)
-                .Select(entry => TilePaletteProfileUtility.GetResourceId(entry) + "@" + TilePaletteProfileUtility.GetTargetPosition(group, entry)))
-                .OrderBy(item => item, StringComparer.Ordinal));
-            return Hash128.Compute(value).ToString();
+            string value = string.Join("|", profile.Groups
+                .OrderBy(group => group.Id, StringComparer.Ordinal)
+                .SelectMany(group => group.entries
+                    .Where(entry => entry.included)
+                    .OrderBy(entry => entry.sourceId, StringComparer.Ordinal)
+                    .Select(entry => TilePaletteProfileUtility.GetResourceId(entry) + "@" +
+                                     TilePaletteProfileUtility.GetTargetPosition(group, entry))));
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+                return BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant().Substring(0, 24);
+            }
         }
 
         private static void ValidateProfile(TilePaletteProfile profile)
         {
-            if (profile == null) throw new InvalidOperationException("请选择 TilePaletteProfile。" );
-            if (!AssetDatabase.IsValidFolder(profile.SourceFolderPath)) throw new InvalidOperationException("Profile 的源文件夹无效。" );
-            if (!AssetDatabase.IsValidFolder(profile.TileOutputFolderPath)) throw new InvalidOperationException("Profile 的 Tile 输出文件夹无效。" );
-            if (profile.PalettePrefab == null || string.IsNullOrEmpty(profile.PalettePrefabPath)) throw new InvalidOperationException("Profile 的 Palette Prefab 无效。" );
-            string[] duplicateIds = profile.IncludedEntries
-                .Select(entry => new { entry, id = TilePaletteProfileUtility.GetResourceId(entry) })
-                .Where(value => !string.IsNullOrWhiteSpace(value.id))
-                .GroupBy(value => value.id, StringComparer.Ordinal)
+            if (profile == null) throw new InvalidOperationException("Select a TilePaletteProfile.");
+            if (!AssetDatabase.IsValidFolder(profile.TileOutputFolderPath))
+                throw new InvalidOperationException("Profile Tile Output Folder is invalid.");
+            if (profile.PalettePrefab == null || string.IsNullOrWhiteSpace(profile.PalettePrefabPath))
+                throw new InvalidOperationException("Profile Palette Prefab is invalid.");
+            if (profile.Groups.Count == 0)
+                throw new InvalidOperationException("Profile contains no layout. Apply a Recipe first.");
+
+            string[] duplicateGroups = profile.Groups.GroupBy(group => group.Id, StringComparer.Ordinal)
                 .Where(group => group.Count() > 1)
-                .Select(group => group.First().entry.sourceId)
+                .Select(group => group.Key)
                 .ToArray();
-            if (duplicateIds.Length > 0) throw new InvalidOperationException("Profile 重复分配 Sprite：" + string.Join(", ", duplicateIds));
-            if (profile.IncludedEntries.Any(entry => entry.sprite == null)) throw new InvalidOperationException("Profile 存在丢失 Sprite 引用。" );
+            if (duplicateGroups.Length > 0)
+                throw new InvalidOperationException("Profile contains duplicate groups: " + string.Join(", ", duplicateGroups));
+            if (profile.IncludedEntries.Any(entry => entry.sprite == null))
+                throw new InvalidOperationException("Profile contains a missing Sprite reference.");
+
+            string[] duplicateSprites = profile.IncludedEntries
+                .GroupBy(TilePaletteProfileUtility.GetResourceId, StringComparer.Ordinal)
+                .Where(group => !string.IsNullOrWhiteSpace(group.Key) && group.Count() > 1)
+                .Select(group => group.First().sourceId)
+                .ToArray();
+            if (duplicateSprites.Length > 0)
+                throw new InvalidOperationException("Profile assigns the same Sprite more than once: " + string.Join(", ", duplicateSprites));
+
+            Vector3Int[] duplicateCells = profile.Groups
+                .SelectMany(group => group.entries.Where(entry => entry.included)
+                    .Select(entry => TilePaletteProfileUtility.GetTargetPosition(group, entry)))
+                .GroupBy(position => position)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .ToArray();
+            if (duplicateCells.Length > 0)
+                throw new InvalidOperationException("Profile contains duplicate target cells: " + string.Join(", ", duplicateCells));
         }
 
-        private static LayoutPlanItem NewItem(LayoutPlanAction action, TilePaletteProfileGroup group, TilePaletteProfileEntry entry, TileBase tile, Vector3Int? current, Vector3Int? target, string diagnostic)
+        private static void ThrowIfConflicts(LayoutPlan plan)
         {
-            return new LayoutPlanItem { action = action, group = group, entry = entry, tile = tile, currentPosition = current, targetPosition = target, diagnostic = diagnostic };
+            if (plan.HasBlockingConflicts)
+                throw new InvalidOperationException(string.Join("\n", plan.Errors));
+        }
+
+        private static LayoutPlanItem Item(
+            LayoutPlanAction action,
+            TilePaletteProfileGroup group,
+            TilePaletteProfileEntry entry,
+            TileBase tile,
+            Vector3Int? current,
+            Vector3Int target)
+        {
+            return new LayoutPlanItem
+            {
+                action = action,
+                group = group,
+                entry = entry,
+                tile = tile,
+                currentPosition = current,
+                targetPosition = target
+            };
+        }
+
+        private static LayoutPlanItem Conflict(string message)
+        {
+            return new LayoutPlanItem
+            {
+                action = LayoutPlanAction.Conflict,
+                diagnostic = message
+            };
         }
 
         private static Tilemap RequireTilemap(GameObject root, string path)
         {
-            Tilemap[] maps = root.GetComponentsInChildren<Tilemap>(true);
-            if (maps.Length != 1) throw new InvalidOperationException($"{path} 需要且只能包含一个 Tilemap，实际为 {maps.Length}。" );
-            return maps[0];
+            Tilemap tilemap = root.GetComponentInChildren<Tilemap>(true);
+            if (tilemap == null) throw new InvalidOperationException("Palette Prefab contains no Tilemap: " + path);
+            return tilemap;
         }
 
         private static string UniqueTilePath(string folder, string sourceId)
         {
-            char[] invalid = Path.GetInvalidFileNameChars();
-            string safeName = new string((sourceId ?? "tile").Select(character => invalid.Contains(character) ? '_' : character).ToArray());
-            string path = folder.TrimEnd('/') + "/" + safeName + ".asset";
-            return AssetDatabase.GenerateUniqueAssetPath(path);
+            string safeName = string.Concat((string.IsNullOrWhiteSpace(sourceId) ? "Tile" : sourceId)
+                .Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
+            return AssetDatabase.GenerateUniqueAssetPath(folder.TrimEnd('/') + "/" + safeName + ".asset");
         }
 
         private static string AbsolutePath(string assetPath)
         {
-            string root = Directory.GetParent(Application.dataPath)?.FullName ?? throw new InvalidOperationException("无法解析 Unity 项目根目录。" );
-            return Path.GetFullPath(Path.Combine(root, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            return Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar));
         }
 
         private sealed class TileAssetIndex
         {
             private readonly Dictionary<Sprite, TileBase> bySprite = new Dictionary<Sprite, TileBase>();
-            public readonly Dictionary<TileBase, Sprite> byTile = new Dictionary<TileBase, Sprite>();
-            public readonly List<string> conflicts = new List<string>();
+            public readonly List<string> Conflicts = new List<string>();
 
             public static TileAssetIndex Load(TilePaletteProfile profile)
             {
@@ -573,67 +516,55 @@ namespace TilePaletteLayoutStudio
                 {
                     string path = AssetDatabase.GUIDToAssetPath(guid);
                     TileBase tile = AssetDatabase.LoadAssetAtPath<TileBase>(path);
-                    if (tile is Tile plain && plain.sprite != null)
-                    {
-                        if (index.bySprite.TryGetValue(plain.sprite, out TileBase duplicate))
-                            index.conflicts.Add($"多个 Tile 引用同一 Sprite：{AssetDatabase.GetAssetPath(duplicate)} 与 {path}");
-                        else
-                        {
-                            index.bySprite[plain.sprite] = tile;
-                            index.byTile[tile] = plain.sprite;
-                        }
-                    }
-                    else if (profile.IncludedEntries.All(entry => entry.tile != tile))
-                    {
-                        index.conflicts.Add($"无法识别来源的自定义 TileBase：{path}");
-                    }
+                    if (!(tile is Tile plainTile) || plainTile.sprite == null) continue;
+                    if (index.bySprite.TryGetValue(plainTile.sprite, out TileBase existing) && existing != tile)
+                        index.Conflicts.Add("Multiple Tile assets use Sprite " + plainTile.sprite.name + ".");
+                    else
+                        index.bySprite[plainTile.sprite] = tile;
                 }
-                foreach (TilePaletteProfileEntry entry in profile.IncludedEntries.Where(entry => entry.tile != null))
+
+                foreach (TilePaletteProfileEntry entry in profile.Groups.SelectMany(group => group.entries))
                 {
-                    if (!index.byTile.ContainsKey(entry.tile)) index.byTile[entry.tile] = entry.sprite;
-                    if (!index.bySprite.ContainsKey(entry.sprite)) index.bySprite[entry.sprite] = entry.tile;
+                    if (entry.tile == null) continue;
+                    if (!(entry.tile is Tile plainTile) || plainTile.sprite != entry.sprite)
+                        index.Conflicts.Add("Tile does not match Sprite: " + entry.sourceId);
+                    else
+                        index.bySprite[entry.sprite] = entry.tile;
                 }
                 return index;
             }
 
             public TileBase Resolve(TilePaletteProfileEntry entry)
             {
-                if (entry.tile != null)
-                {
-                    if (entry.tile is Tile plain && plain.sprite != entry.sprite) conflicts.Add($"{entry.sourceId} 的 Tile 引用了不同 Sprite。" );
-                    return entry.tile;
-                }
-                if (entry.sprite != null && bySprite.TryGetValue(entry.sprite, out TileBase tile))
-                {
-                    return tile;
-                }
-                return null;
+                if (entry.tile != null) return entry.tile;
+                return entry.sprite != null && bySprite.TryGetValue(entry.sprite, out TileBase tile) ? tile : null;
             }
         }
 
         private sealed class PaletteSnapshot
         {
-            public readonly Dictionary<Vector3Int, TileBase> byPosition = new Dictionary<Vector3Int, TileBase>();
+            private readonly Dictionary<Vector3Int, TileBase> byPosition = new Dictionary<Vector3Int, TileBase>();
             private readonly Dictionary<TileBase, List<Vector3Int>> positions = new Dictionary<TileBase, List<Vector3Int>>();
+            public IEnumerable<KeyValuePair<Vector3Int, TileBase>> Cells => byPosition;
 
-            public static PaletteSnapshot Load(TilePaletteProfile profile, TileAssetIndex assets)
+            public static PaletteSnapshot Load(TilePaletteProfile profile)
             {
+                PaletteSnapshot snapshot = new PaletteSnapshot();
                 GameObject root = PrefabUtility.LoadPrefabContents(profile.PalettePrefabPath);
                 try
                 {
                     Tilemap tilemap = RequireTilemap(root, profile.PalettePrefabPath);
-                    PaletteSnapshot snapshot = new PaletteSnapshot();
                     foreach (Vector3Int position in tilemap.cellBounds.allPositionsWithin)
                     {
                         TileBase tile = tilemap.GetTile(position);
                         if (tile == null) continue;
                         snapshot.byPosition[position] = tile;
-                        if (!snapshot.positions.TryGetValue(tile, out List<Vector3Int> list))
+                        if (!snapshot.positions.TryGetValue(tile, out List<Vector3Int> cells))
                         {
-                            list = new List<Vector3Int>();
-                            snapshot.positions[tile] = list;
+                            cells = new List<Vector3Int>();
+                            snapshot.positions[tile] = cells;
                         }
-                        list.Add(position);
+                        cells.Add(position);
                     }
                     return snapshot;
                 }
@@ -643,8 +574,17 @@ namespace TilePaletteLayoutStudio
                 }
             }
 
-            public TileBase TileAt(Vector3Int position) => byPosition.TryGetValue(position, out TileBase tile) ? tile : null;
-            public List<Vector3Int> Positions(TileBase tile) => tile != null && positions.TryGetValue(tile, out List<Vector3Int> list) ? list : new List<Vector3Int>();
+            public TileBase TileAt(Vector3Int position)
+            {
+                return byPosition.TryGetValue(position, out TileBase tile) ? tile : null;
+            }
+
+            public IReadOnlyList<Vector3Int> Positions(TileBase tile)
+            {
+                return tile != null && positions.TryGetValue(tile, out List<Vector3Int> cells)
+                    ? cells
+                    : Array.Empty<Vector3Int>();
+            }
         }
     }
 }
