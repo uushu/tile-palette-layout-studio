@@ -11,6 +11,7 @@ All notable changes to this package are documented in this file.
 - Kept transactional Build, independent Validate, rollback, and Ctrl+S Profile synchronization.
 - Made Profile-external Tiles outside Recipe target cells silent and preserved.
 - Prevented Build-owned saves from triggering Ctrl+S synchronization.
+- Persisted reused Tile references back into the Profile during Build.
 
 ### Removed
 

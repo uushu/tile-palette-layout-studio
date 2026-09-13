@@ -218,6 +218,18 @@ namespace TilePaletteLayoutStudio
 
                 LayoutPlan plan = CreatePlan(profile);
                 ThrowIfConflicts(plan);
+                bool assignedExistingTiles = false;
+                foreach (LayoutPlanItem item in plan.items.Where(value =>
+                             value.entry != null && value.tile != null && value.entry.tile == null))
+                {
+                    item.entry.tile = item.tile;
+                    assignedExistingTiles = true;
+                }
+                if (assignedExistingTiles)
+                {
+                    EditorUtility.SetDirty(profile);
+                    TilePaletteAutoSyncGuard.SaveAssetsWithoutSync();
+                }
                 GameObject root = PrefabUtility.LoadPrefabContents(prefabPath);
                 try
                 {
