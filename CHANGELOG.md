@@ -12,6 +12,7 @@ All notable changes to this package are documented in this file.
 - Made Profile-external Tiles outside Recipe target cells silent and preserved.
 - Prevented Build-owned saves from triggering Ctrl+S synchronization.
 - Persisted reused Tile references back into the Profile during Build.
+- Validation failures now identify the affected Tiles and their current and expected cells.
 
 ### Removed
 

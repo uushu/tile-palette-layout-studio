@@ -295,11 +295,23 @@ namespace TilePaletteLayoutStudio
         {
             LayoutPlan plan = CreatePlan(profile);
             ThrowIfConflicts(plan);
-            int incomplete = plan.Count(LayoutPlanAction.Create) +
-                             plan.Count(LayoutPlanAction.Place) +
-                             plan.Count(LayoutPlanAction.Move);
-            if (incomplete > 0)
-                throw new InvalidOperationException("Palette has " + incomplete + " unapplied Profile cells.");
+            LayoutPlanItem[] incomplete = plan.items.Where(item =>
+                    item.action == LayoutPlanAction.Create ||
+                    item.action == LayoutPlanAction.Place ||
+                    item.action == LayoutPlanAction.Move)
+                .ToArray();
+            if (incomplete.Length > 0)
+            {
+                string details = string.Join(", ", incomplete.Take(8).Select(item =>
+                {
+                    string sourceId = item.entry != null ? item.entry.sourceId : item.tile != null ? item.tile.name : "Unknown Tile";
+                    string current = item.currentPosition.HasValue ? item.currentPosition.Value.ToString() : "missing";
+                    return sourceId + " " + current + " -> " + item.targetPosition;
+                }));
+                if (incomplete.Length > 8) details += ", ...";
+                throw new InvalidOperationException(
+                    "Palette has " + incomplete.Length + " unapplied Profile cells: " + details + ".");
+            }
             return CalculateLayoutHash(profile);
         }
 
