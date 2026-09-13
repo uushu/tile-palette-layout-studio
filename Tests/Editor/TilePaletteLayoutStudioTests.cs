@@ -20,7 +20,21 @@ namespace TilePaletteLayoutStudio.Tests
                 "wall",
                 Vector3Int.zero,
                 TilePaletteLayoutRecipe.Tile("wall_1", 0, 0));
-            Assert.That(group, Is.Not.Null);
+            Assert.That(group.SubgroupName, Is.EqualTo("main"));
+        }
+
+        [Test]
+        public void RecipeGroup_PreservesExplicitLocalCoordinates()
+        {
+            TilePaletteRecipeGroup group = TilePaletteLayoutRecipe.Group(
+                "arch",
+                "main",
+                new Vector3Int(10, -5, 0),
+                TilePaletteLayoutRecipe.Tile("arch_left", 0, 0),
+                TilePaletteLayoutRecipe.Tile("arch_right", 2, -1));
+
+            Assert.That(group.Origin, Is.EqualTo(new Vector3Int(10, -5, 0)));
+            Assert.That(group.Entries[1].LocalPosition, Is.EqualTo(new Vector3Int(2, -1, 0)));
         }
 
         [Test]
@@ -64,16 +78,76 @@ namespace TilePaletteLayoutStudio.Tests
         }
 
         [Test]
-        public void UnknownTileWarning_IsOneLineWithAtMostThreeExamples()
+        public void PreviewUtility_UsesTheRealSpriteTextureRegion()
         {
-            string warning = TilePaletteBuilder.FormatUnknownTileWarning(
-                4,
-                new[] { "a at (0, 0, 0)", "b at (1, 0, 0)", "c at (2, 0, 0)", "d at (3, 0, 0)" });
+            Texture2D texture = new Texture2D(8, 8);
+            Sprite sprite = Sprite.Create(texture, new Rect(2, 1, 4, 3), Vector2.one * 0.5f, 8f);
+            try
+            {
+                Assert.That(
+                    TilePalettePreviewUtility.GetSpriteUv(sprite),
+                    Is.EqualTo(new Rect(0.25f, 0.125f, 0.5f, 0.375f)));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(sprite);
+                UnityEngine.Object.DestroyImmediate(texture);
+            }
+        }
 
-            Assert.That(warning, Does.Contain("4 Profile-external Tiles"));
-            Assert.That(warning, Does.Contain("a at (0, 0, 0)"));
-            Assert.That(warning, Does.Contain("c at (2, 0, 0)"));
-            Assert.That(warning, Does.Not.Contain("d at (3, 0, 0)"));
+        [Test]
+        public void PreviewUtility_BuildsOnlyNonEmptyGroups()
+        {
+            Texture2D texture = new Texture2D(1, 1);
+            Sprite sprite = Sprite.Create(texture, new Rect(0, 0, 1, 1), Vector2.one * 0.5f, 1f);
+            TilePaletteProfile profile = ScriptableObject.CreateInstance<TilePaletteProfile>();
+            try
+            {
+                profile.ReplaceGroups(new[]
+                {
+                    new TilePaletteProfileGroup
+                    {
+                        groupName = "shape",
+                        subgroupName = "main",
+                        entries = new List<TilePaletteProfileEntry>
+                        {
+                            new TilePaletteProfileEntry
+                            {
+                                sprite = sprite,
+                                included = true,
+                                localPosition = new Vector3Int(2, -3, 0)
+                            }
+                        }
+                    },
+                    new TilePaletteProfileGroup
+                    {
+                        groupName = "empty",
+                        subgroupName = "main"
+                    }
+                });
+
+                IReadOnlyList<TilePalettePreviewGroup> groups = TilePalettePreviewUtility.BuildGroups(profile);
+                Assert.That(groups, Has.Count.EqualTo(1));
+                Assert.That(groups[0].Id, Is.EqualTo("shape/main"));
+                Assert.That(groups[0].Bounds.min, Is.EqualTo(new Vector3Int(2, -3, 0)));
+                Assert.That(groups[0].Bounds.size, Is.EqualTo(Vector3Int.one));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(profile);
+                UnityEngine.Object.DestroyImmediate(sprite);
+                UnityEngine.Object.DestroyImmediate(texture);
+            }
+        }
+
+        [Test]
+        public void BuildSaveSuppression_IsScoped()
+        {
+            Assert.That(TilePaletteAutoSyncGuard.IsSuppressed, Is.False);
+            using (TilePaletteAutoSyncGuard.Suppress())
+                Assert.That(TilePaletteAutoSyncGuard.IsSuppressed, Is.True);
+
+            Assert.That(TilePaletteAutoSyncGuard.IsSuppressed, Is.False);
         }
     }
 }

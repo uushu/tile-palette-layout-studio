@@ -1,9 +1,9 @@
 {
   "name": "com.uushu.tile-palette-layout-studio",
   "displayName": "Tile Palette Layout Studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "unity": "2022.3",
-  "description": "A Unity Editor extension that applies reviewed layout Recipes to Profiles, previews them, builds Tile Palettes, and syncs manual edits.",
+  "description": "A Recipe-driven Unity Editor tool for previewing, safely building, validating, and maintaining Tile Palettes.",
   "keywords": [
     "2d",
     "tile",
@@ -16,17 +16,9 @@
     "url": "https://github.com/uushu/tile-palette-layout-studio"
   },
   "dependencies": {
-    "com.unity.modules.imageconversion": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0",
     "com.unity.modules.tilemap": "1.0.0"
   },
-  "samples": [
-    {
-      "displayName": "Layout Templates",
-      "description": "Optional project template examples for reviewed layout Recipes.",
-      "path": "Samples~/Layout Templates"
-    }
-  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/uushu/tile-palette-layout-studio.git"

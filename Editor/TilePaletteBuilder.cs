@@ -58,7 +58,6 @@ namespace TilePaletteLayoutStudio
         public int moved;
         public int deleted;
         public int restored;
-        public readonly List<string> warnings = new List<string>();
         public bool HasChanges => moved > 0 || deleted > 0 || restored > 0;
     }
 
@@ -115,13 +114,6 @@ namespace TilePaletteLayoutStudio
     internal static class TilePaletteBuilder
     {
         internal static Action AfterPrefabSavedForValidation;
-
-        internal static string FormatUnknownTileWarning(int count, IEnumerable<string> examples)
-        {
-            return "Palette contains " + count +
-                   " Profile-external Tiles; preserved. Examples: " +
-                   string.Join(", ", examples.Take(3));
-        }
 
         public static LayoutPlan CreatePlan(TilePaletteProfile profile)
         {
@@ -248,8 +240,11 @@ namespace TilePaletteLayoutStudio
 
                     tilemap.CompressBounds();
                     EditorUtility.SetDirty(tilemap);
-                    if (PrefabUtility.SaveAsPrefabAsset(root, prefabPath) == null)
-                        throw new InvalidOperationException("Unity failed to save the Palette Prefab.");
+                    using (TilePaletteAutoSyncGuard.Suppress())
+                    {
+                        if (PrefabUtility.SaveAsPrefabAsset(root, prefabPath) == null)
+                            throw new InvalidOperationException("Unity failed to save the Palette Prefab.");
+                    }
                     AfterPrefabSavedForValidation?.Invoke();
                 }
                 finally
@@ -316,17 +311,6 @@ namespace TilePaletteLayoutStudio
 
             foreach (TileBase tile in resolved.Values.Where(tile => tile != null))
                 knownTiles.Add(tile);
-            List<string> unknownTileExamples = new List<string>();
-            foreach (KeyValuePair<Vector3Int, TileBase> cell in palette.Cells)
-            {
-                if (!knownTiles.Contains(cell.Value))
-                    unknownTileExamples.Add(cell.Value.name + " at " + cell.Key);
-            }
-            if (unknownTileExamples.Count > 0)
-                result.warnings.Add(FormatUnknownTileWarning(
-                    unknownTileExamples.Count,
-                    unknownTileExamples));
-
             try
             {
                 Undo.RecordObject(profile, "Sync Tile Palette Profile");

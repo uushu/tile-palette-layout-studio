@@ -11,15 +11,26 @@ namespace TilePaletteLayoutStudio
         private static int suppressionDepth;
         public static bool IsSuppressed => suppressionDepth > 0;
 
-        public static void SaveAssetsWithoutSync()
+        public static IDisposable Suppress()
         {
             suppressionDepth++;
-            try
-            {
+            return new SuppressionScope();
+        }
+
+        public static void SaveAssetsWithoutSync()
+        {
+            using (Suppress())
                 AssetDatabase.SaveAssets();
-            }
-            finally
+        }
+
+        private sealed class SuppressionScope : IDisposable
+        {
+            private bool disposed;
+
+            public void Dispose()
             {
+                if (disposed) return;
+                disposed = true;
                 suppressionDepth--;
             }
         }
@@ -32,7 +43,7 @@ namespace TilePaletteLayoutStudio
 
         private static string[] OnWillSaveAssets(string[] paths)
         {
-            if (TilePaletteAutoSyncGuard.IsSuppressed || paths == null) return paths;
+            if (!ShouldScheduleSync(paths)) return paths;
             HashSet<string> saved = new HashSet<string>(paths, StringComparer.Ordinal);
             foreach (TilePaletteProfile profile in TilePaletteProfileStore.FindAll())
             {
@@ -46,6 +57,15 @@ namespace TilePaletteLayoutStudio
                 EditorApplication.delayCall += SyncSavedPalettes;
             }
             return paths;
+        }
+
+        internal static bool ShouldScheduleSync(string[] paths)
+        {
+            if (TilePaletteAutoSyncGuard.IsSuppressed || paths == null || paths.Length == 0) return false;
+            HashSet<string> saved = new HashSet<string>(paths, StringComparer.Ordinal);
+            return TilePaletteProfileStore.FindAll().Any(profile =>
+                !string.IsNullOrWhiteSpace(profile.PalettePrefabPath) &&
+                saved.Contains(profile.PalettePrefabPath));
         }
 
         private static void SyncSavedPalettes()
@@ -62,8 +82,6 @@ namespace TilePaletteLayoutStudio
                 {
                     TilePaletteSyncResult result = TilePaletteBuilder.SyncPaletteToProfile(profile);
                     changed |= result.HasChanges;
-                    foreach (string warning in result.warnings.Distinct(StringComparer.Ordinal))
-                        Debug.LogWarning("[TilePalette] 自动同步警告：" + warning);
                 }
                 catch (Exception exception)
                 {

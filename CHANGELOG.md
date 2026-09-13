@@ -2,6 +2,21 @@
 
 All notable changes to this package are documented in this file.
 
+## 0.2.0 - 2026-09-13
+
+### Changed
+
+- Replaced automatic layout inference with an explicit developer/Codex Recipe workflow.
+- Added a compact final preview that draws the real Sprite texture region.
+- Kept transactional Build, independent Validate, rollback, and Ctrl+S Profile synchronization.
+- Made Profile-external Tiles outside Recipe target cells silent and preserved.
+- Prevented Build-owned saves from triggering Ctrl+S synchronization.
+
+### Removed
+
+- Removed visual-model providers, API configuration, HTTP/proxy code, layout candidates, and inference templates.
+- Removed the obsolete layout-template sample.
+
 ## 0.1.0 - 2026-09-10
 
 ### Added

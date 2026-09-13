@@ -118,43 +118,88 @@ namespace TilePaletteLayoutStudio
 
         private void DrawPreview()
         {
-            List<PreviewEntry> entries = profile.Groups
-                .SelectMany(group => group.entries.Where(entry => entry.included && entry.sprite != null)
-                    .Select(entry => new PreviewEntry
-                    {
-                        Group = group,
-                        Entry = entry,
-                        Position = TilePaletteProfileUtility.GetTargetPosition(group, entry)
-                    }))
-                .ToList();
-            if (entries.Count == 0) return;
+            IReadOnlyList<TilePalettePreviewGroup> groups = TilePalettePreviewUtility.BuildGroups(profile);
+            if (groups.Count == 0) return;
 
             EditorGUILayout.Space(10f);
             EditorGUILayout.LabelField(
                 new GUIContent("Layout Preview", "The final layout currently stored in the Profile."),
                 EditorStyles.boldLabel);
-            BoundsInt bounds = TilePaletteProfileUtility.CalculateBounds(entries.Select(entry => entry.Position));
-            float width = Mathf.Max(position.width - 26f, bounds.size.x * PreviewCellSize);
-            float height = bounds.size.y * PreviewCellSize;
-            Rect area = GUILayoutUtility.GetRect(width, height);
 
-            foreach (PreviewEntry previewEntry in entries)
+            float availableWidth = Mathf.Max(320f, position.width - 30f);
+            const float cardPadding = 8f;
+            const float labelHeight = 20f;
+            const float cardSpacing = 10f;
+            float cursorX = 0f;
+            float cursorY = 0f;
+            float rowHeight = 0f;
+            TilePalettePreviewCard[] cards = groups.Select(group =>
             {
-                int x = previewEntry.Position.x - bounds.xMin;
-                int y = bounds.yMax - 1 - previewEntry.Position.y;
-                Rect tileRect = new Rect(
-                    area.x + x * PreviewCellSize,
-                    area.y + y * PreviewCellSize,
-                    PreviewCellSize - 2f,
-                    PreviewCellSize - 2f);
-                Texture preview = AssetPreview.GetAssetPreview(previewEntry.Entry.sprite) ??
-                                  AssetPreview.GetMiniThumbnail(previewEntry.Entry.sprite);
-                if (preview != null) GUI.DrawTexture(tileRect, preview, ScaleMode.ScaleToFit, true);
-                GUI.Box(
-                    tileRect,
-                    new GUIContent(
-                        string.Empty,
-                        previewEntry.Group.Id + "/" + previewEntry.Entry.sourceId + " " + previewEntry.Position));
+                float labelWidth = EditorStyles.boldLabel.CalcSize(new GUIContent(group.Id)).x + cardPadding * 2f;
+                float cardWidth = Mathf.Max(
+                    120f,
+                    group.Bounds.size.x * PreviewCellSize + cardPadding * 2f,
+                    labelWidth);
+                float cardHeight = labelHeight + group.Bounds.size.y * PreviewCellSize + cardPadding * 2f;
+                if (cursorX > 0f && cursorX + cardWidth > availableWidth)
+                {
+                    cursorX = 0f;
+                    cursorY += rowHeight + cardSpacing;
+                    rowHeight = 0f;
+                }
+                TilePalettePreviewCard card = new TilePalettePreviewCard
+                {
+                    Group = group,
+                    Position = new Rect(cursorX, cursorY, cardWidth, cardHeight)
+                };
+                cursorX += cardWidth + cardSpacing;
+                rowHeight = Mathf.Max(rowHeight, cardHeight);
+                return card;
+            }).ToArray();
+            float totalHeight = cursorY + rowHeight;
+            Rect area = GUILayoutUtility.GetRect(availableWidth, totalHeight);
+
+            foreach (TilePalettePreviewCard card in cards)
+            {
+                Rect cardRect = new Rect(
+                    area.x + card.Position.x,
+                    area.y + card.Position.y,
+                    card.Position.width,
+                    card.Position.height);
+                EditorGUI.DrawRect(cardRect, new Color(0.16f, 0.16f, 0.17f, 1f));
+                GUI.Label(
+                    new Rect(cardRect.x + cardPadding, cardRect.y + 3f, cardRect.width - cardPadding * 2f, labelHeight),
+                    new GUIContent(card.Group.Id, "Profile group and subgroup."),
+                    EditorStyles.boldLabel);
+                Rect gridRect = new Rect(
+                    cardRect.x + cardPadding,
+                    cardRect.y + labelHeight + cardPadding,
+                    card.Group.Bounds.size.x * PreviewCellSize,
+                    card.Group.Bounds.size.y * PreviewCellSize);
+                foreach (TilePalettePreviewEntry previewEntry in card.Group.Entries)
+                {
+                    int x = previewEntry.LocalPosition.x - card.Group.Bounds.xMin;
+                    int y = card.Group.Bounds.yMax - 1 - previewEntry.LocalPosition.y;
+                    Rect cellRect = new Rect(
+                        gridRect.x + x * PreviewCellSize,
+                        gridRect.y + y * PreviewCellSize,
+                        PreviewCellSize,
+                        PreviewCellSize);
+                    EditorGUI.DrawRect(cellRect, new Color(0.22f, 0.22f, 0.23f, 1f));
+                    Rect spriteRect = TilePalettePreviewUtility.GetSpriteDrawRect(previewEntry.Entry.sprite, cellRect);
+                    GUI.DrawTextureWithTexCoords(
+                        spriteRect,
+                        previewEntry.Entry.sprite.texture,
+                        TilePalettePreviewUtility.GetSpriteUv(previewEntry.Entry.sprite),
+                        true);
+                    GUI.Box(
+                        cellRect,
+                        new GUIContent(
+                            string.Empty,
+                            card.Group.Id + "/" + previewEntry.Entry.sourceId + " " +
+                            previewEntry.TargetPosition),
+                        GUIStyle.none);
+                }
             }
         }
 
@@ -202,11 +247,10 @@ namespace TilePaletteLayoutStudio
             }
         }
 
-        private sealed class PreviewEntry
+        private sealed class TilePalettePreviewCard
         {
-            public TilePaletteProfileGroup Group;
-            public TilePaletteProfileEntry Entry;
-            public Vector3Int Position;
+            public TilePalettePreviewGroup Group;
+            public Rect Position;
         }
     }
 }
