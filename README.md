@@ -1,211 +1,130 @@
+<div align="center">
+
 # Tile Palette Layout Studio
 
-Tile Palette Layout Studio is a focused Unity Editor tool for turning an explicitly reviewed layout Recipe into a safe, maintainable Tile Palette.
+**Reconstruct original multi-tile structures from loose Sprite assets.**
 
-It does **not** guess how arbitrary art should connect. A developer or Codex decides the project-specific arrangement once; the package then stores it in a Profile, shows the final two-dimensional preview, builds the Palette transactionally, validates the result, and keeps accepted manual edits after `Ctrl+S`.
+A Recipe-driven Unity Editor tool for restoring reviewed Sprite relationships into reusable Tile Palette layouts — including structures split across separate PNGs, textures, or spritesheets.
 
-## Final workflow
+[![Unity 2022.3+](https://img.shields.io/badge/Unity-2022.3%2B-000000?style=for-the-badge&logo=unity&logoColor=white)](https://unity.com/releases/editor/archive)
+[![Package v0.2.0](https://img.shields.io/badge/Package-v0.2.0-2ea44f?style=for-the-badge)](package.json)
+[![MIT License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE.md)
+
+[Installation](#installation) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [License](#license)
+
+</div>
+
+---
+
+## Overview
+
+When a tileset is sliced into separate Sprites, Unity keeps the images but often loses the **original object structure** that made those pieces meaningful together.
+
+A wall becomes a collection of loose tiles. A tall window becomes several unrelated Sprites. Stairs, arches, frames, terrain transitions, props, and other multi-tile objects lose the spatial relationships they originally had.
+
+Tile Palette Layout Studio restores that missing organization at the **Tile Palette level**.
+
+A project-specific **Recipe** records which Sprites belong together and where each piece sits inside the reconstructed object. The Studio then previews the result, safely builds or updates the Palette, validates the final state, and keeps accepted manual edits synchronized.
+
+> **This is not a file sorter.** The core purpose is to reconstruct and preserve the original multi-tile structure of loose or sliced Sprite assets.
+
+| Capability | What it does |
+| --- | --- |
+| **Reconstruct multi-tile structures** | Restores walls, windows, stairs, arches, terrain pieces, props, and other objects from loose Sprites. |
+| **Work across textures** | Related pieces can come from separate PNGs, multiple textures, spritesheets, or a mixture of them. |
+| **Use reviewed structure** | A developer or coding agent defines the Recipe instead of relying on filename order or automatic guessing. |
+| **Preview before writing** | Shows compact 2D previews using the actual Sprite texture regions. |
+| **Build safely** | Reuses compatible Tiles, checks conflicts, validates writes, and rolls back failed builds. |
+| **Stay editable** | Accepted manual Palette edits can synchronize back into the Profile on save. |
+
+## Workflow
 
 ```text
-Imported Sprites
-      ↓
-Developer/Codex reviews the art
-      ↓
-Project Recipe: Sprite → group + local cell
-      ↓
-Profile: resolved Sprite/Tile references + final positions
-      ↓
-Layout Preview
-      ↓
-Build Palette: preflight → backup → write → validate → rollback on failure
-      ↓
-Independent Validate
-      ↓
-Optional manual move/delete in the Palette → Ctrl+S → Profile sync
+Loose / sliced Sprite assets
+            ↓
+Review the original structure
+            ↓
+Project Recipe
+Sprite → group / subgroup / local cell
+            ↓
+2D Layout Preview
+            ↓
+Build / Update Tile Palette
+            ↓
+Validate
+            ↓
+Manual edits → Ctrl+S → Profile sync
 ```
 
-## What the package does
-
-- Resolves Recipe entries from direct `Sprite` references or unique Sprite/file names.
-- Rejects missing Sprites, duplicate groups, duplicate Sprite assignments, and overlapping target cells.
-- Reuses existing ordinary `Tile` assets and creates only missing Tiles.
-- Shows one compact preview card per Recipe group/subgroup using the real Sprite texture region.
-- Builds a Palette only after a read-only preflight succeeds.
-- Validates every Profile Tile after writing.
-- Restores the previous Profile and Palette files if Build fails.
-- Keeps unrelated Tiles outside Recipe target cells untouched and silent.
-- Blocks Build when an unrelated Tile occupies a Recipe target cell.
-- Detects manual group moves, individual Tile moves, deletions, and restorations when the Palette is saved.
-- Rolls the Profile back if `Ctrl+S` synchronization finds a duplicate known Tile or another invalid result.
-- Supports multiple Profiles and Palette prefabs.
-
-## What the package does not do
-
-- No visual AI, API key, endpoint, proxy, HTTP request, or network dependency.
-- No automatic Row/Column/Grid candidate selection.
-- No project asset names, fixed Sprite counts, fixed paths, or RPG-specific layout rules.
-- No automatic deletion of unknown or unrelated Palette Tiles.
-- No promise that file numbering describes visual structure; the Recipe must express the reviewed structure.
-
-## Requirements
-
-- Unity `2022.3` or newer.
-- Unity 2D Tilemap support.
-- Imported Sprite assets.
-- A folder for generated ordinary `Tile` assets.
-- A Palette prefab containing a `Tilemap`.
+The Recipe contains the project-specific visual knowledge. The package provides the reusable Unity Editor workflow around that knowledge.
 
 ## Installation
 
-In Unity Package Manager:
-
-1. Click **Add package from git URL**.
-2. Enter:
+Open **Window → Package Manager**, choose **+ → Add package from git URL...**, and enter:
 
 ```text
 https://github.com/uushu/tile-palette-layout-studio.git
 ```
 
-For package development, use **Add package from disk** and select this repository's `package.json`.
+For local package development, clone the repository and use **Add package from disk...** with `package.json`.
 
-Do not also copy the package source into `Assets/Editor`; one Unity project should compile only one active copy.
+## Quick Start
 
-## Project setup
-
-1. Open **Tools > Tile Palette > Layout Studio**.
+1. Open **Tools → Tile Palette → Layout Studio**.
 2. Create or select a `TilePaletteProfile`.
-3. Assign:
-   - **Source Folder**: where name-based Recipe entries are resolved.
-   - **Tile Output Folder**: where missing ordinary Tile assets are created.
-   - **Palette Prefab**: the Tile Palette to build and validate.
-4. Add a project-specific Editor Recipe outside the package.
+3. Assign the **Source Folder**, **Tile Output Folder**, and **Palette Prefab**.
+4. Add a project-specific Recipe in the consuming project's Editor code.
 5. Apply the Recipe to the Profile.
 6. Inspect **Layout Preview**.
 7. Click **Build Palette**.
-8. Click **Validate** independently.
+8. Run **Validate**.
 
-## Minimal Recipe example
+## How It Works
 
-Place project Recipes in your own Editor folder, not inside this package:
+### 1. Describe the original structure
 
-```csharp
-using TilePaletteLayoutStudio;
-using UnityEditor;
-using UnityEngine;
+A Recipe records the Sprite identity, object group or subgroup, local grid cell, and Palette origin. The Recipe can be written manually or generated by a coding agent after reviewing the source art.
 
-internal static class ProjectTilePaletteRecipe
-{
-    private const string ProfilePath = "Assets/TilePalette/TilePaletteProfile.asset";
+### 2. Resolve project references
 
-    [MenuItem("Tools/Tile Palette/Apply Project Recipe")]
-    public static void Apply()
-    {
-        TilePaletteProfile profile =
-            AssetDatabase.LoadAssetAtPath<TilePaletteProfile>(ProfilePath);
+The Studio resolves Recipe entries from direct Sprite references or unique Sprite/file names and stores the actual Sprite and Tile references in the Profile.
 
-        TilePaletteLayoutRecipe.Apply(
-            profile,
-            TilePaletteLayoutRecipe.Group(
-                "arch",
-                "main",
-                new Vector3Int(0, 0, 0),
-                TilePaletteLayoutRecipe.Tile("arch_left", 0, 0),
-                TilePaletteLayoutRecipe.Tile("arch_top", 1, 0),
-                TilePaletteLayoutRecipe.Tile("arch_right", 2, 0),
-                TilePaletteLayoutRecipe.Tile("arch_base_left", 0, -1),
-                TilePaletteLayoutRecipe.Tile("arch_base_right", 2, -1)));
-    }
-}
-```
+### 3. Preview the reconstructed layout
 
-A Recipe entry records:
+`Layout Preview` renders the actual Sprite texture regions, preserves intentional holes inside structures, and packs separate groups compactly for review without changing their real Palette origins.
 
-- the Sprite identity,
-- the object group and optional subgroup,
-- the local cell within that object,
-- the group's Palette origin.
+### 4. Build safely
 
-The Profile resolves and stores the actual `Sprite` and `TileBase` references. This lets asset renames remain stable after the Recipe has been applied, while reapplying a name-based Recipe still requires the names to resolve uniquely.
+Before writing, the Studio validates the Profile, inspects the current Palette, plans the required changes, and stops on blocking conflicts. A failed build restores the previous state.
 
-## Preview
+### 5. Keep manual edits
 
-`Layout Preview` is the final Profile layout, not an AI candidate list. It:
+After a successful build, the Palette remains editable. Moving, deleting, or restoring managed Tiles and saving the Palette can synchronize accepted changes back into the Profile. Unrelated external Tiles remain outside Profile ownership.
 
-- draws actual Sprite texture regions instead of generic asset icons,
-- preserves empty cells inside shapes such as arches,
-- packs groups compactly for review without changing their real Palette origins,
-- shows the full group/subgroup name,
-- exposes Sprite and target-cell details in tooltips.
+## Scope & Limitations
 
-Preview is read-only. Only applying a Recipe or accepting a manual Palette save changes the Profile; only **Build Palette** changes the Palette.
+Tile Palette Layout Studio deliberately separates **structure reconstruction** from **Palette execution**.
 
-## Build safety
+The package does not try to guess arbitrary Sprite layouts automatically. Loose Sprite assets often do not contain enough information to recover one uniquely correct arrangement, and filename order is not a reliable substitute for visual structure.
 
-Build performs these steps:
+Instead, a developer or coding agent reviews the source art once, records the intended structure in a Recipe, and lets the Studio make that result visible, repeatable, safe to build, and maintainable afterward.
 
-1. Validate Profile paths and Recipe data.
-2. Index reusable Tile assets by Sprite.
-3. Read the current Palette.
-4. Create a plan containing `Keep`, `Create`, `Place`, `Move`, or blocking `Conflict` items.
-5. Stop before writing if any blocking conflict exists.
-6. Back up the Profile and Palette bytes.
-7. Create only missing ordinary Tile assets.
-8. Move/place known Tiles into Recipe target cells.
-9. Save the Palette without triggering manual-save synchronization.
-10. Validate every Profile cell.
-11. Save the final layout hash.
-12. On any exception, restore both files and delete Tiles created by that Build.
+The package contains no project-specific asset names or hard-coded layout rules. Project Recipes, Profiles, source art, generated Tiles, and Palette prefabs remain in the consuming project.
 
-A second Build of an already matching Palette is idempotent: it creates and moves nothing.
+## Requirements
 
-## Manual edits and Ctrl+S
+- Unity **2022.3** or newer
+- Unity **2D Tilemap** support
+- Imported Sprite assets
+- A folder for generated ordinary Tile assets
+- A Tile Palette prefab containing a `Tilemap`
 
-After a successful Build, you may edit the Palette manually:
+## Contributing
 
-- If every Tile in one group moves by the same offset, `Ctrl+S` updates only the group origin.
-- If individual known Tiles move, `Ctrl+S` updates their local positions.
-- If a known Tile is deleted, `Ctrl+S` marks that Profile entry as excluded.
-- If an excluded known Tile is restored, `Ctrl+S` includes it again at its current position.
-- Unrelated external Tiles remain outside Profile ownership.
-- A duplicate known Tile causes synchronization to fail with a specific error and restores the previous Profile file.
+Issues and pull requests are welcome.
 
-Successful synchronization logs only:
-
-```text
-[TilePalette] 自动同步完成
-```
-
-Normal external Tiles do not create warning spam. Errors identify the Tile or invalid Profile condition that blocked the operation.
-
-## Validation
-
-The package Editor tests cover:
-
-- Recipe argument validation,
-- explicit local-coordinate preservation,
-- Profile bounds and managed-cell holes,
-- real Sprite UV preview data,
-- compact preview group creation,
-- Build-save synchronization suppression.
-
-A consuming project should additionally validate its own Recipe coverage and exemplar structures because those rules are project-specific.
-
-## Architecture
-
-- `TilePaletteLayoutRecipe`: explicit Recipe API and Recipe-to-Profile conversion.
-- `TilePaletteProfile`: serialized references, groups, local coordinates, origins, inclusion state, and build hash.
-- `TilePalettePreviewUtility`: real Sprite UVs and compact group preview data.
-- `TilePaletteLayoutStudioWindow`: Profile paths, Build, Validate, and final Preview.
-- `TilePaletteBuilder`: planning, Tile reuse/creation, transactional Build, validation, synchronization, and rollback.
-- `TilePaletteAutoSync`: distinguishes user Palette saves from Build-owned saves and triggers Profile synchronization.
-- `TilePaletteProfileUtility`: target positions, layout bounds, and managed-cell checks.
-
-## Local project versus GitHub package
-
-A project can temporarily keep the generic source in `Assets/Editor` while developing the tool. GitHub users should install the UPM package. Do not activate both forms in the same Unity project.
-
-Project-specific Recipes, Profiles, source art, generated Tiles, and Palette prefabs remain in the consuming project and are never published with the generic package.
+For reconstruction or build issues, include the Unity version, expected structure, current preview, and a minimal description of the source Sprite set when possible.
 
 ## License
 
-Tile Palette Layout Studio is released under the MIT License. See `LICENSE.md`.
+Tile Palette Layout Studio is released under the [MIT License](LICENSE.md).
